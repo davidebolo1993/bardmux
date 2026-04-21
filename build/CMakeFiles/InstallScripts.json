@@ -1,0 +1,8 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/davide.bolognini/bardmux/build/cmake_install.cmake",
+		"/Users/davide.bolognini/bardmux/build/test/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
