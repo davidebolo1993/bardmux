@@ -1,7 +1,7 @@
 #include "anchor_finder.h"
 #include <algorithm>
+#include <cstring>
 
-// Complement lookup table
 static const char comp_lut[256] = {
     'N','N','N','N','N','N','N','N','N','N','N','N','N','N','N','N',
     'N','N','N','N','N','N','N','N','N','N','N','N','N','N','N','N',
@@ -43,10 +43,10 @@ int AnchorFinder::find_first(const std::string& text,
 {
     const int tlen = static_cast<int>(text.size());
     const int plen = static_cast<int>(pattern.size());
-    if (plen == 0 || plen > tlen) return -1;
+    if (__builtin_expect(plen == 0 || plen > tlen, 0)) return -1;
     if (search_end < 0 || search_end > tlen - plen)
         search_end = tlen - plen;
-    if (search_start > search_end) return -1;
+    if (__builtin_expect(search_start > search_end, 0)) return -1;
 
     const char* t = text.data() + search_start;
     const char* p = pattern.data();
@@ -56,7 +56,7 @@ int AnchorFinder::find_first(const std::string& text,
         int mm = 0;
         for (int j = 0; j < plen; ++j) {
             if (t[i + j] != p[j]) {
-                if (++mm > max_errors) goto next_pos;
+                if (__builtin_expect(++mm > max_errors, 1)) goto next_pos;
             }
         }
         return search_start + i;
@@ -65,10 +65,6 @@ int AnchorFinder::find_first(const std::string& text,
     return -1;
 }
 
-// Extract CB+UMI from a FORWARD-orientation anchor pair.
-// Layout in raw read: ... A1 ... [CB (cb_length bp)][UMI (umi_length bp)] ... A2 ...
-// a1_end:    position just after anchor1 ends
-// a2_start:  position where anchor2 starts
 AnchorMatch AnchorFinder::extract_fwd(const std::string& seq,
                                        int a1_end, int a2_start) const
 {
@@ -81,8 +77,7 @@ AnchorMatch AnchorFinder::extract_fwd(const std::string& seq,
     const int cb_len  = config_.cb_length;
     const int umi_len = config_.umi_length;
 
-    int avail = a2_start - a1_end;
-    if (avail >= cb_len)
+    if (a2_start - a1_end >= cb_len)
         m.extracted_cb = seq.substr(a1_end, cb_len);
 
     int umi_start = a1_end + cb_len;
@@ -93,45 +88,49 @@ AnchorMatch AnchorFinder::extract_fwd(const std::string& seq,
     return m;
 }
 
-// Extract CB+UMI from a REVERSE-COMPLEMENT anchor pair.
-//
-// On the original sense strand:   5' A1 - CB - UMI - A2 3'
-// On the raw (antisense) read:    5' A2_rc - UMI_rc - CB_rc - A1_rc 3'
-//
-// So in the raw read A2_rc appears BEFORE A1_rc.
-// We search for A2_rc first (left anchor), then A1_rc (right anchor).
-// The region between them, when reverse-complemented, yields: CB (first cb_length bp) + UMI.
-//
-// a2rc_end:   position just after A2_rc ends  (left boundary of insert)
-// a1rc_start: position where A1_rc starts     (right boundary of insert)
 AnchorMatch AnchorFinder::extract_rc(const std::string& seq,
                                       int a2rc_end, int a1rc_start) const
 {
     AnchorMatch m;
     m.found                = true;
     m.is_reverse_complement = true;
-    m.anchor1_end          = a2rc_end;    // reported as the "left" boundary
-    m.anchor2_start        = a1rc_start;  // reported as the "right" boundary
+    m.anchor1_end          = a2rc_end;
+    m.anchor2_start        = a1rc_start;
 
     const int cb_len  = config_.cb_length;
     const int umi_len = config_.umi_length;
+    const int region_len = a1rc_start - a2rc_end;
 
-    int region_len = a1rc_start - a2rc_end;
-    if (region_len < cb_len) return m;  // truncated — cannot extract full CB
+    if (__builtin_expect(region_len < cb_len, 0)) return m;
 
-    // RC the region to restore sense-strand orientation
-    std::string region_rc = reverse_complement(seq.substr(a2rc_end, region_len));
-
-    m.extracted_cb  = region_rc.substr(0, cb_len);
-    int umi_avail   = static_cast<int>(region_rc.size()) - cb_len;
-    if (umi_avail > 0)
-        m.extracted_umi = region_rc.substr(cb_len, std::min(umi_len, umi_avail));
-
+    // Use a stack buffer for the RC region (≤ 128 bp for CB+UMI)
+    // Avoids heap allocation for the most common short-insert case.
+    const int MAX_STACK = 128;
+    if (region_len <= MAX_STACK) {
+        char buf[MAX_STACK + 1];
+        const char* src = seq.data() + a2rc_end;
+        for (int i = 0; i < region_len; ++i)
+            buf[i] = comp_lut[static_cast<unsigned char>(src[region_len - 1 - i])];
+        buf[region_len] = '\0';
+        m.extracted_cb.assign(buf, cb_len);
+        int umi_avail = region_len - cb_len;
+        if (umi_avail > 0)
+            m.extracted_umi.assign(buf + cb_len,
+                                   std::min(umi_len, umi_avail));
+    } else {
+        // Fallback for unusually large regions
+        std::string rc = seq.substr(a2rc_end, region_len);
+        for (int i = 0, j = region_len - 1; i < j; ++i, --j)
+            std::swap(rc[i], rc[j]);
+        for (char& c : rc) c = comp_lut[static_cast<unsigned char>(c)];
+        m.extracted_cb = rc.substr(0, cb_len);
+        if (region_len > cb_len)
+            m.extracted_umi = rc.substr(cb_len,
+                std::min(umi_len, region_len - cb_len));
+    }
     return m;
 }
 
-// Forward orientation search:
-//   Scan for A1_fwd, then A2_fwd to the right of it.
 AnchorMatch AnchorFinder::try_fwd(const std::string& seq) const
 {
     const int slen  = static_cast<int>(seq.size());
@@ -141,35 +140,31 @@ AnchorMatch AnchorFinder::try_fwd(const std::string& seq) const
     int pos = 0;
     while (true) {
         int a1_pos = find_first(seq, config_.anchor1, config_.max_errors, pos, slen - a1len);
-        if (a1_pos < 0) break;
+        if (__builtin_expect(a1_pos < 0, 1)) break;
         int a1_end = a1_pos + a1len;
         int a2_pos = find_first(seq, config_.anchor2, config_.max_errors,
                                  a1_end + config_.cb_length, slen - a2len);
-        if (a2_pos >= 0)
+        if (__builtin_expect(a2_pos >= 0, 0))
             return extract_fwd(seq, a1_end, a2_pos);
         pos = a1_pos + 1;
     }
     return AnchorMatch{};
 }
 
-// Reverse-complement orientation search:
-//   On the raw read, A2_rc appears FIRST, A1_rc appears SECOND.
-//   Scan for A2_rc, then A1_rc to the right of it.
 AnchorMatch AnchorFinder::try_rc(const std::string& seq) const
 {
-    const int slen   = static_cast<int>(seq.size());
+    const int slen    = static_cast<int>(seq.size());
     const int a2rclen = static_cast<int>(anchor2_rc_.size());
     const int a1rclen = static_cast<int>(anchor1_rc_.size());
 
     int pos = 0;
     while (true) {
         int a2rc_pos = find_first(seq, anchor2_rc_, config_.max_errors, pos, slen - a2rclen);
-        if (a2rc_pos < 0) break;
+        if (__builtin_expect(a2rc_pos < 0, 1)) break;
         int a2rc_end = a2rc_pos + a2rclen;
-        // Minimum gap between the two anchors = cb_length (exact; UMI can be truncated)
         int a1rc_pos = find_first(seq, anchor1_rc_, config_.max_errors,
                                    a2rc_end + config_.cb_length, slen - a1rclen);
-        if (a1rc_pos >= 0)
+        if (__builtin_expect(a1rc_pos >= 0, 0))
             return extract_rc(seq, a2rc_end, a1rc_pos);
         pos = a2rc_pos + 1;
     }
@@ -177,15 +172,13 @@ AnchorMatch AnchorFinder::try_rc(const std::string& seq) const
 }
 
 AnchorMatch AnchorFinder::find_anchors(const FastqRecord& record) const {
-    // Try forward orientation first (most common for the sense strand)
     {
         auto m = try_fwd(record.sequence);
-        if (m.found) return m;
+        if (__builtin_expect(m.found, 0)) return m;
     }
-    // Try reverse-complement orientation
     {
         auto m = try_rc(record.sequence);
-        if (m.found) return m;
+        if (__builtin_expect(m.found, 0)) return m;
     }
     return AnchorMatch{};
 }

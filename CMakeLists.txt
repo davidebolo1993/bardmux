@@ -40,8 +40,7 @@ target_link_libraries(bardmux PRIVATE
     Threads::Threads
 )
 
-#enable_testing()
-#add_subdirectory(test EXCLUDE_FROM_ALL)
+enable_testing()
 
 install(TARGETS bardmux DESTINATION bin)
 
