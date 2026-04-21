@@ -14,15 +14,22 @@ bool ReportWriter::ensure_dir(const std::string& path) {
     return false;
 }
 
-gzFile ReportWriter::get_or_open_split(const std::string& sample) {
+ReportWriter::SplitSink* ReportWriter::get_or_open_split(const std::string& sample) {
+    std::lock_guard<std::mutex> lock(split_map_mtx_);
     auto it = split_files_.find(sample);
-    if (it != split_files_.end()) return it->second;
+    if (it != split_files_.end()) return it->second.get();
+
     std::string path = config_.split_dir + "/" + sample + ".fastq.gz";
-    gzFile gz = gzopen(path.c_str(), "wb");
+    // Compression level 1 favors throughput when split output is enabled.
+    gzFile gz = gzopen(path.c_str(), "wb1");
     if (!gz) throw std::runtime_error("Cannot open split file: " + path);
     gzbuffer(gz, 1 << 20);
-    split_files_[sample] = gz;
-    return gz;
+
+    auto sink = std::make_unique<SplitSink>();
+    sink->gz = gz;
+    SplitSink* ptr = sink.get();
+    split_files_[sample] = std::move(sink);
+    return ptr;
 }
 
 void ReportWriter::write_fastq_gz(gzFile gz, const FastqRecord& rec) {
@@ -45,8 +52,9 @@ ReportWriter::ReportWriter(const ReporterConfig& cfg) : config_(cfg) {
 }
 
 ReportWriter::~ReportWriter() {
-    for (auto& [name, gz] : split_files_)
-        if (gz) gzclose(gz);
+    std::lock_guard<std::mutex> map_lock(split_map_mtx_);
+    for (auto& [name, sink] : split_files_)
+        if (sink && sink->gz) gzclose(sink->gz);
 }
 
 bool ReportWriter::open_tsv_output() {
@@ -124,26 +132,35 @@ void ReportWriter::add_entries(std::vector<ReportChunkItem>&& items) {
     reads_matched_.fetch_add(matched, std::memory_order_relaxed);
     ambiguous_calls_.fetch_add(ambig, std::memory_order_relaxed);
 
-    std::lock_guard<std::mutex> lock(mtx_);
-    tsv_out_->write(tsv_chunk.data(), static_cast<std::streamsize>(tsv_chunk.size()));
+    {
+        std::lock_guard<std::mutex> lock(tsv_mtx_);
+        tsv_out_->write(tsv_chunk.data(), static_cast<std::streamsize>(tsv_chunk.size()));
+    }
 
     // Only stream unambiguous, matched reads with a known sample to split files.
     if (!config_.split_dir.empty()) {
         for (const auto& item : items) {
             const auto& e = item.entry;
             if (e.status != CallStatus::unique || e.sample.empty()) continue;
-            gzFile gz = get_or_open_split(e.sample);
-            write_fastq_gz(gz, item.record);
+            SplitSink* sink = get_or_open_split(e.sample);
+            std::lock_guard<std::mutex> sample_lock(sink->mtx);
+            write_fastq_gz(sink->gz, item.record);
         }
     }
 }
 
 bool ReportWriter::finalize() {
-    std::lock_guard<std::mutex> lock(mtx_);
-    tsv_out_->flush();
-    for (auto& [name, gz] : split_files_) {
-        gzflush(gz, Z_FINISH);
-        gzclose(gz);
+    {
+        std::lock_guard<std::mutex> lock(tsv_mtx_);
+        tsv_out_->flush();
+    }
+
+    std::lock_guard<std::mutex> map_lock(split_map_mtx_);
+    for (auto& [name, sink] : split_files_) {
+        if (!sink || !sink->gz) continue;
+        gzflush(sink->gz, Z_FINISH);
+        gzclose(sink->gz);
+        sink->gz = nullptr;
     }
     split_files_.clear();
     if (config_.verbose) {

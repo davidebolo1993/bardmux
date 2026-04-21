@@ -6,6 +6,7 @@
 #include <atomic>
 #include <unordered_map>
 #include <vector>
+#include <memory>
 #include <zlib.h>
 #include "fastq_reader.h"
 
@@ -70,13 +71,19 @@ public:
     int ambiguous_calls()    const { return ambiguous_calls_.load(); }
 
 private:
+    struct SplitSink {
+        gzFile     gz = nullptr;
+        std::mutex mtx;
+    };
+
     ReporterConfig config_;
     std::ostream*  tsv_out_  = nullptr;
     std::ofstream  tsv_fout_;
     char           tsv_buf_[1 << 20]{};
 
-    std::unordered_map<std::string, gzFile> split_files_;
-    std::mutex mtx_;
+    std::unordered_map<std::string, std::unique_ptr<SplitSink>> split_files_;
+    std::mutex tsv_mtx_;
+    std::mutex split_map_mtx_;
 
     std::atomic<int> reads_with_anchors_{0};
     std::atomic<int> reads_matched_     {0};
@@ -85,7 +92,7 @@ private:
     bool   open_tsv_output();
     void   write_tsv_header();
     static void append_tsv_line(std::string& out, const ReportEntry& e);
-    gzFile get_or_open_split(const std::string& sample);
+    SplitSink* get_or_open_split(const std::string& sample);
     void   write_fastq_gz(gzFile gz, const FastqRecord& rec);
     bool   ensure_dir(const std::string& path);
 };
