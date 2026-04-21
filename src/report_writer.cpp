@@ -26,7 +26,6 @@ gzFile ReportWriter::get_or_open_split(const std::string& sample) {
 }
 
 void ReportWriter::write_fastq_gz(gzFile gz, const FastqRecord& rec) {
-    // '@' + name + '\n'
     gzputc(gz, '@');
     gzwrite(gz, rec.name.data(),     static_cast<unsigned>(rec.name.size()));
     gzputc(gz, '\n');
@@ -63,42 +62,79 @@ bool ReportWriter::open_tsv_output() {
 }
 
 void ReportWriter::write_tsv_header() {
-    *tsv_out_ << "read_id\tanchors_found\tstrand\tanchor1_pos\tanchor2_pos\t"
-                 "extracted_cb\textracted_umi\tcb_matched\tmatched_cb\t"
-                 "edit_distance\tsample\tambiguous\n";
+    *tsv_out_ <<
+        "read_id\t"
+        "status\t"
+        "strand\t"
+        "anchor1_pos\t"
+        "anchor2_pos\t"
+        "extracted_cb\t"
+        "extracted_umi\t"
+        "matched_cb\t"
+        "edit_distance\t"
+        "n_candidates\t"
+        "sample\n";
 }
 
-void ReportWriter::add_entry(const ReportEntry& e, const FastqRecord& rec) {
-    if (e.anchors_found)  reads_with_anchors_++;
-    if (e.cb_matched)     reads_matched_++;
-    if (e.ambiguous)      ambiguous_calls_++;
+void ReportWriter::append_tsv_line(std::string& out, const ReportEntry& e) {
+    static constexpr const char* UNASSIGNED = "unassigned";
 
-    // Build TSV into a stack buffer — zero heap allocation
-    char buf[1024];
-    int n = std::snprintf(buf, sizeof(buf),
-        "%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
-        e.read_id.c_str(),
-        e.anchors_found ? "true" : "false",
-        e.strand.c_str(),
-        e.anchor1_pos,
-        e.anchor2_pos,
-        e.extracted_cb.c_str(),
-        e.extracted_umi.c_str(),
-        e.cb_matched ? "true" : "false",
-        e.matched_cb.c_str(),
-        e.edit_distance,
-        e.sample.c_str(),
-        e.ambiguous ? "true" : "false");
+    out.append(e.read_id);
+    out.push_back('\t');
+    out.append(status_str(e.status));
+    out.push_back('\t');
+    out.append(e.strand);
+    out.push_back('\t');
+    out.append(std::to_string(e.anchor1_pos));
+    out.push_back('\t');
+    out.append(std::to_string(e.anchor2_pos));
+    out.push_back('\t');
+    out.append(e.extracted_cb);
+    out.push_back('\t');
+    out.append(e.extracted_umi);
+    out.push_back('\t');
+    out.append(e.matched_cb.empty() ? UNASSIGNED : e.matched_cb);
+    out.push_back('\t');
+    out.append(std::to_string(e.edit_distance));
+    out.push_back('\t');
+    out.append(std::to_string(e.n_candidates));
+    out.push_back('\t');
+    out.append(e.sample.empty() ? UNASSIGNED : e.sample);
+    out.push_back('\n');
+}
 
-    if (n < 0) return;  // snprintf error
-    if (n >= static_cast<int>(sizeof(buf))) n = sizeof(buf) - 1;
+void ReportWriter::add_entries(std::vector<ReportChunkItem>&& items) {
+    if (items.empty()) return;
+
+    int anchors = 0;
+    int matched = 0;
+    int ambig   = 0;
+
+    std::string tsv_chunk;
+    tsv_chunk.reserve(items.size() * 128);
+    for (const auto& item : items) {
+        const auto& e = item.entry;
+        if (e.anchors_found) ++anchors;
+        if (e.cb_matched)    ++matched;
+        if (e.ambiguous)     ++ambig;
+        append_tsv_line(tsv_chunk, e);
+    }
+
+    reads_with_anchors_.fetch_add(anchors, std::memory_order_relaxed);
+    reads_matched_.fetch_add(matched, std::memory_order_relaxed);
+    ambiguous_calls_.fetch_add(ambig, std::memory_order_relaxed);
 
     std::lock_guard<std::mutex> lock(mtx_);
-    tsv_out_->write(buf, n);
+    tsv_out_->write(tsv_chunk.data(), static_cast<std::streamsize>(tsv_chunk.size()));
 
-    if (!config_.split_dir.empty() && e.cb_matched && !e.sample.empty() && !e.ambiguous) {
-        gzFile gz = get_or_open_split(e.sample);
-        write_fastq_gz(gz, rec);
+    // Only stream unambiguous, matched reads with a known sample to split files.
+    if (!config_.split_dir.empty()) {
+        for (const auto& item : items) {
+            const auto& e = item.entry;
+            if (e.status != CallStatus::unique || e.sample.empty()) continue;
+            gzFile gz = get_or_open_split(e.sample);
+            write_fastq_gz(gz, item.record);
+        }
     }
 }
 

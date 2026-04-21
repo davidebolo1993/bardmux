@@ -4,30 +4,24 @@
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
-#include <cstring>
 
-// Fixed-size barcode entry — zero heap allocation per whitelist entry.
-// Barcodes are ≤32 bp; sample labels ≤63 chars.
 struct BarcodeEntry {
-    char barcode[33]{};   // null-terminated, ≤32 bp
-    char sample [64]{};   // null-terminated, empty = no donor column
+    std::string barcode;
+    std::string sample;
     bool has_sample = false;
 
     void set_barcode(const std::string& s) {
-        auto n = s.size() < 32 ? s.size() : 32;
-        std::memcpy(barcode, s.data(), n);
-        barcode[n] = '\0';
+        barcode = s;
     }
     void set_sample(const std::string& s) {
-        auto n = s.size() < 63 ? s.size() : 63;
-        std::memcpy(sample, s.data(), n);
-        sample[n] = '\0';
+        sample = s;
         has_sample = true;
     }
 };
 
 struct BarcodeMatch {
     bool        found          = false;
+    bool        ambiguous      = false;
     std::string matched_barcode;
     int         edit_distance  = -1;
     int         num_candidates = 0;

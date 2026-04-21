@@ -9,13 +9,15 @@ struct AnchorConfig {
     int         max_errors     = 3;
     int         cb_length      = 16;
     int         umi_length     = 12;
+    int         gap_slack      = 20;    // allow A1..A2 region up to CB+UMI+gap_slack
+    bool        use_gap_slack  = true;  // disabled by --no-fallback
 };
 
 struct AnchorMatch {
     bool        found                  = false;
     bool        is_reverse_complement  = false;
-    int         anchor1_end            = -1;   // right boundary of left anchor in raw read
-    int         anchor2_start          = -1;   // left boundary of right anchor in raw read
+    int         anchor1_pos            = -1;   // start of anchor1 (or anchor1_rc in RC read)
+    int         anchor2_pos            = -1;   // start of anchor2 (or anchor2_rc in RC read)
     std::string extracted_cb;
     std::string extracted_umi;
 };
@@ -44,6 +46,6 @@ private:
     // RC: A2_rc precedes A1_rc in raw read  →  RC the region to recover CB+UMI
     AnchorMatch try_rc(const std::string& seq) const;
 
-    AnchorMatch extract_fwd(const std::string& seq, int a1_end,   int a2_start) const;
-    AnchorMatch extract_rc (const std::string& seq, int a2rc_end, int a1rc_start) const;
+    AnchorMatch extract_fwd(const std::string& seq, int a1_pos, int a2_pos) const;
+    AnchorMatch extract_rc (const std::string& seq, int a2rc_pos, int a1rc_pos) const;
 };

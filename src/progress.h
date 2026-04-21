@@ -11,6 +11,15 @@ struct alignas(64) PaddedAtomic {
     char pad[64 - sizeof(std::atomic<long>)]{};
 };
 
+struct ProgressDelta {
+    long total       = 0;
+    long with_anchor = 0;
+    long cb_matched  = 0;
+    long exact       = 0;
+    long ambiguous   = 0;
+    long no_donor    = 0;
+};
+
 class ProgressTracker {
 public:
     explicit ProgressTracker(long interval = 100000)
@@ -22,13 +31,31 @@ public:
     void record_read(bool anchor_found, bool cb_matched, bool exact_match,
                      bool ambiguous, bool no_donor)
     {
-        long cur = ++total_.value;
-        if (anchor_found) ++with_anchor_.value;
-        if (cb_matched)   ++cb_matched_.value;
-        if (exact_match)  ++exact_.value;
-        if (ambiguous)    ++ambiguous_.value;
-        if (no_donor)     ++no_donor_.value;
+        ProgressDelta d;
+        d.total       = 1;
+        d.with_anchor = anchor_found ? 1 : 0;
+        d.cb_matched  = cb_matched ? 1 : 0;
+        d.exact       = exact_match ? 1 : 0;
+        d.ambiguous   = ambiguous ? 1 : 0;
+        d.no_donor    = no_donor ? 1 : 0;
+        record_batch(d);
+    }
 
+    void record_batch(const ProgressDelta& d) {
+        if (d.total <= 0) return;
+        long cur = total_.value.fetch_add(d.total, std::memory_order_relaxed) + d.total;
+        if (d.with_anchor)
+            with_anchor_.value.fetch_add(d.with_anchor, std::memory_order_relaxed);
+        if (d.cb_matched)
+            cb_matched_.value.fetch_add(d.cb_matched, std::memory_order_relaxed);
+        if (d.exact)
+            exact_.value.fetch_add(d.exact, std::memory_order_relaxed);
+        if (d.ambiguous)
+            ambiguous_.value.fetch_add(d.ambiguous, std::memory_order_relaxed);
+        if (d.no_donor)
+            no_donor_.value.fetch_add(d.no_donor, std::memory_order_relaxed);
+
+        if (interval_ <= 0) return;
         long milestone = cur / interval_;
         long prev = last_milestone_.value.load(std::memory_order_relaxed);
         if (milestone > prev)

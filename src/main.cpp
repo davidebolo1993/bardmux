@@ -22,6 +22,8 @@ struct Config {
     int         max_anchor_errors = 3;
     int         cb_length         = 16;
     int         umi_length        = 12;
+    int         anchor_gap_slack  = 20;
+    bool        use_anchor_gap_slack = true;
 
     int  max_edit_distance = 2;
     int  min_margin        = 1;
@@ -29,7 +31,7 @@ struct Config {
 
     int  num_threads    = std::max(1u, std::thread::hardware_concurrency());
     int  batch_size     = 4096;
-    int  progress_every = 100000;   // print progress line every N reads (0 = off)
+    int  progress_every = 100000;
 
     bool verbose = false;
 };
@@ -38,26 +40,27 @@ void print_usage(const char* prog) {
     std::cerr
         << "Usage: " << prog << " [options] -i INPUT -b BARCODES\n\n"
         << "Required:\n"
-        << "  -i FILE     Input FASTQ / FASTQ.gz\n"
+        << "  -i FILE     Input FASTQ / FASTQ.gz (or - for stdin)\n"
         << "  -b FILE     Barcode whitelist (1-col or 2-col TSV)\n\n"
         << "Anchor:\n"
-        << "  -A SEQ      Anchor 1  [CTACACGACGCTCTTCCGATCT]\n"
+        << "  -A SEQ         Anchor 1  [CTACACGACGCTCTTCCGATCT]\n"
         << "  --anchor2 SEQ  Anchor 2  [TTTCTTATATGGG]\n"
-        << "  -E INT      Max anchor mismatches [3]\n"
-        << "  -C INT      CB length bp [16]\n"
-        << "  -U INT      UMI length bp [12]\n\n"
+        << "  -E INT         Max anchor mismatches [3]\n"
+        << "  -C INT         CB length bp [16]\n"
+        << "  -U INT         UMI length bp [12]\n"
+        << "  --gap-slack INT  Extra bp allowed between anchors [20]\n"
+        << "  --no-fallback   Disable extra gap slack (strict CB+UMI window)\n\n"
         << "Barcode matching:\n"
         << "  -e INT      Max edit distance [2]\n"
         << "  -m INT      Min margin for unambiguous call [1]\n"
         << "  -k INT      K-mer length for whitelist filter [8]\n\n"
         << "Output:\n"
         << "  -o FILE     TSV assignments [stdout]\n"
-        << "  -d DIR      Stream matched reads to DIR/<sample>.fastq.gz\n\n"
+        << "  -d DIR      Stream unique matched reads to DIR/<sample>.fastq.gz\n\n"
         << "Performance:\n"
         << "  -t INT      Threads [hardware_concurrency]\n"
-        << "  -B INT      Reads per batch [4096]\n\n"
-        << "Progress:\n"
-        << "  -p INT      Print progress every INT reads [100000] (0 = off)\n"
+        << "  -B INT      Reads per batch [4096]\n"
+        << "  -p INT      Progress interval in reads [100000] (0 = off)\n"
         << "  -v          Verbose startup info\n";
 }
 
@@ -74,6 +77,8 @@ bool parse_arguments(int argc, char** argv, Config& cfg) {
         else if (a=="-E"  && i+1<argc) cfg.max_anchor_errors = std::stoi(argv[++i]);
         else if (a=="-C"  && i+1<argc) cfg.cb_length         = std::stoi(argv[++i]);
         else if (a=="-U"  && i+1<argc) cfg.umi_length        = std::stoi(argv[++i]);
+        else if (a=="--gap-slack" && i+1<argc) cfg.anchor_gap_slack = std::stoi(argv[++i]);
+        else if (a=="--no-fallback") cfg.use_anchor_gap_slack = false;
         else if (a=="-e"  && i+1<argc) cfg.max_edit_distance = std::stoi(argv[++i]);
         else if (a=="-m"  && i+1<argc) cfg.min_margin        = std::stoi(argv[++i]);
         else if (a=="-k"  && i+1<argc) cfg.kmer_length       = std::stoi(argv[++i]);
@@ -88,6 +93,13 @@ bool parse_arguments(int argc, char** argv, Config& cfg) {
         std::cerr << "Error: -i and -b are required\n";
         print_usage(argv[0]); return false;
     }
+    if (cfg.max_anchor_errors < 0 || cfg.max_edit_distance < 0 ||
+        cfg.cb_length <= 0 || cfg.umi_length < 0 || cfg.kmer_length <= 0 ||
+        cfg.num_threads <= 0 || cfg.batch_size <= 0 ||
+        cfg.progress_every < 0 || cfg.min_margin < 0 || cfg.anchor_gap_slack < 0) {
+        std::cerr << "Error: invalid numeric argument value\n";
+        return false;
+    }
     return true;
 }
 
@@ -99,6 +111,10 @@ static void process_batch(std::vector<BatchItem>  batch,
                            ReportWriter&           report_writer,
                            ProgressTracker*        progress)
 {
+    std::vector<ReportChunkItem> chunk;
+    chunk.reserve(batch.size());
+    ProgressDelta delta;
+
     for (auto& item : batch) {
         AnchorMatch am = anchor_finder.find_anchors(item.record);
 
@@ -106,36 +122,51 @@ static void process_batch(std::vector<BatchItem>  batch,
         entry.read_id       = item.record.name;
         entry.anchors_found = am.found;
         entry.strand        = am.is_reverse_complement ? "RC" : "FWD";
-        entry.anchor1_pos   = am.anchor1_end;
-        entry.anchor2_pos   = am.anchor2_start;
+        entry.anchor1_pos   = am.anchor1_pos;
+        entry.anchor2_pos   = am.anchor2_pos;
         entry.extracted_cb  = am.extracted_cb;
         entry.extracted_umi = am.extracted_umi;
 
-        bool exact    = false;
-        bool no_donor = false;
-
-        if (am.found && !am.extracted_cb.empty()) {
+        // Determine call status
+        if (!am.found) {
+            entry.status = CallStatus::no_anchor;
+        } else if (am.extracted_cb.empty()) {
+            entry.status = CallStatus::no_cb;
+        } else {
             BarcodeMatch bm = barcode_matcher.match_barcode(am.extracted_cb);
-            entry.cb_matched    = bm.found;
-            entry.matched_cb    = bm.matched_barcode;
             entry.edit_distance = bm.edit_distance;
-            entry.sample        = bm.sample;
-            entry.ambiguous     = (bm.num_candidates > 1);
+            entry.n_candidates  = bm.num_candidates;
 
-            exact    = bm.found && bm.edit_distance == 0;
-            // "no donor" = CB matched but whitelist has no sample column
-            no_donor = bm.found && !entry.ambiguous && bm.sample.empty();
+            if (!bm.found) {
+                entry.status = CallStatus::no_match;
+            } else if (bm.ambiguous) {
+                entry.status    = CallStatus::ambiguous;
+                entry.ambiguous = true;
+                // Intentionally leave matched_cb and sample blank:
+                // the call is not trustworthy for a unique assignment.
+            } else {
+                entry.status       = CallStatus::unique;
+                entry.cb_matched   = true;
+                entry.matched_cb   = bm.matched_barcode;
+                entry.sample       = bm.sample;
+            }
         }
 
-        report_writer.add_entry(entry, item.record);
+        bool exact    = entry.cb_matched && entry.edit_distance == 0;
+        bool no_donor = entry.cb_matched && entry.sample.empty();
 
-        if (progress)
-            progress->record_read(am.found,
-                                  entry.cb_matched,
-                                  exact,
-                                  entry.ambiguous,
-                                  no_donor);
+        ++delta.total;
+        if (am.found)          ++delta.with_anchor;
+        if (entry.cb_matched)  ++delta.cb_matched;
+        if (exact)             ++delta.exact;
+        if (entry.ambiguous)   ++delta.ambiguous;
+        if (no_donor)          ++delta.no_donor;
+
+        chunk.push_back(ReportChunkItem{std::move(entry), std::move(item.record)});
     }
+
+    report_writer.add_entries(std::move(chunk));
+    if (progress) progress->record_batch(delta);
 }
 
 int main(int argc, char** argv) {
@@ -158,6 +189,8 @@ int main(int argc, char** argv) {
         acfg.max_errors = cfg.max_anchor_errors;
         acfg.cb_length  = cfg.cb_length;
         acfg.umi_length = cfg.umi_length;
+        acfg.gap_slack  = cfg.anchor_gap_slack;
+        acfg.use_gap_slack = cfg.use_anchor_gap_slack;
         AnchorFinder anchor_finder(acfg);
 
         MatcherConfig mcfg;
@@ -179,19 +212,16 @@ int main(int argc, char** argv) {
         rcfg.verbose     = cfg.verbose;
         ReportWriter report_writer(rcfg);
 
-        // Progress tracker (null = disabled)
-        ProgressTracker* progress = nullptr;
         std::unique_ptr<ProgressTracker> progress_owned;
+        ProgressTracker* progress = nullptr;
         if (cfg.progress_every > 0) {
             progress_owned = std::make_unique<ProgressTracker>(cfg.progress_every);
             progress = progress_owned.get();
         }
 
         ThreadPool pool(cfg.num_threads);
-
         FastqReader reader(cfg.input_file);
         FastqRecord record;
-        int read_count = 0;
 
         std::vector<BatchItem> batch;
         batch.reserve(cfg.batch_size);
@@ -207,7 +237,6 @@ int main(int argc, char** argv) {
         };
 
         while (reader.next(record)) {
-            ++read_count;
             batch.push_back({std::move(record)});
             if (static_cast<int>(batch.size()) >= cfg.batch_size) dispatch();
         }
@@ -218,7 +247,6 @@ int main(int argc, char** argv) {
             std::cerr << "Error: failed to write report\n"; return 1;
         }
 
-        // Always print final summary if progress is enabled
         if (progress) progress->finalize();
 
     } catch (const std::exception& e) {

@@ -3,28 +3,43 @@
 #include <algorithm>
 #include <limits>
 #include <cctype>
+#include <cstdlib>
 #include <vector>
 #include <unordered_map>
 
-// 2-bit DNA encoding LUT
-static const uint8_t BASE2BIT[256] = {
-    // A=0 C=1 G=2 T=3 (upper and lower); everything else=0
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,1,2,0,0,0,3,0,0,0,0,0,0,0,0, 0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,  // @A..T
-    0,0,1,2,0,0,0,3,0,0,0,0,0,0,0,0, 0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,  // `a..t
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-};
-
-static inline uint64_t kmer_hash(const char* s, int start, int k) {
-    uint64_t h = 0;
-    for (int i = 0; i < k; ++i)
-        h = (h << 2) | BASE2BIT[static_cast<unsigned char>(s[start + i])];
-    return h;
+namespace {
+inline char nt_upper(unsigned char c) {
+    if (c >= 'a' && c <= 'z') c = static_cast<unsigned char>(c - ('a' - 'A'));
+    return static_cast<char>(c);
 }
+
+inline bool encode_acgt(unsigned char c, uint8_t& out) {
+    switch (nt_upper(c)) {
+        case 'A': out = 0; return true;
+        case 'C': out = 1; return true;
+        case 'G': out = 2; return true;
+        case 'T': out = 3; return true;
+        default: return false;
+    }
+}
+
+inline void normalize_barcode(std::string& s) {
+    for (char& c : s) {
+        c = nt_upper(static_cast<unsigned char>(c));
+        if (c != 'A' && c != 'C' && c != 'G' && c != 'T' && c != 'N') c = 'N';
+    }
+}
+
+inline bool kmer_hash_checked(const char* s, int start, int k, uint64_t& h) {
+    h = 0;
+    for (int i = 0; i < k; ++i) {
+        uint8_t b = 0;
+        if (!encode_acgt(static_cast<unsigned char>(s[start + i]), b)) return false;
+        h = (h << 2) | b;
+    }
+    return true;
+}
+} // namespace
 
 // Myers bit-vector edit distance — operates on raw char* to avoid string copies.
 // For sequences ≤ 64 bp: O(n·m/64), zero heap allocation.
@@ -33,35 +48,48 @@ int BarcodeMatcher::edit_distance_myers(const char* a, int n,
 {
     if (n == 0) return m;
     if (m == 0) return n;
+    if (std::abs(n - m) > config_.max_edit_distance)
+        return config_.max_edit_distance + 1;
 
     if (n > 64 || m > 64) {
-        // Banded Levenshtein fallback
-        const int bw = config_.max_edit_distance + 1;
-        std::vector<int> prev(m + 1), curr(m + 1);
+        // Banded Levenshtein fallback for long strings.
+        const int bw  = config_.max_edit_distance;
+        const int INF = config_.max_edit_distance + 1;
+        std::vector<int> prev(m + 1), curr(m + 1, INF);
         for (int j = 0; j <= m; ++j) prev[j] = j;
         for (int i = 1; i <= n; ++i) {
-            curr[0] = i;
-            int lo = std::max(1, i - bw), hi = std::min(m, i + bw);
+            std::fill(curr.begin(), curr.end(), INF);
+            int lo = std::max(1, i - bw);
+            int hi = std::min(m, i + bw);
+            if (lo == 1) curr[0] = i;
+
+            int row_best = INF;
             for (int j = lo; j <= hi; ++j) {
                 int cost = (a[i-1] == b[j-1]) ? 0 : 1;
-                curr[j] = std::min({prev[j]+1, curr[j-1]+1, prev[j-1]+cost});
+                int del  = prev[j] + 1;
+                int ins  = curr[j-1] + 1;
+                int sub  = prev[j-1] + cost;
+                curr[j]  = std::min({del, ins, sub});
+                row_best = std::min(row_best, curr[j]);
             }
             std::swap(prev, curr);
+            if (row_best > config_.max_edit_distance)
+                return config_.max_edit_distance + 1;
         }
         return prev[m];
     }
 
-    // Reduced Peq: only 4 DNA bases needed → 4-entry array indexed by 2-bit code
-    uint64_t Peq[4] = {};
+    // Full ASCII Peq table preserves exact character semantics (e.g. N != A).
+    uint64_t Peq[256] = {};
     for (int j = 0; j < m; ++j)
-        Peq[BASE2BIT[static_cast<unsigned char>(b[j])]] |= (uint64_t(1) << j);
+        Peq[static_cast<unsigned char>(b[j])] |= (uint64_t(1) << j);
 
     const uint64_t mask = (m == 64) ? ~uint64_t(0) : (uint64_t(1) << m) - 1;
     uint64_t VP = mask, VN = 0;
     int score = m;
 
     for (int i = 0; i < n; ++i) {
-        uint64_t eq = Peq[BASE2BIT[static_cast<unsigned char>(a[i])]];
+        uint64_t eq = Peq[static_cast<unsigned char>(a[i])];
         uint64_t X  = eq | VN;
         uint64_t D0 = ((VP + (X & VP)) ^ VP) | X;
         uint64_t HN = VP & D0;
@@ -88,14 +116,16 @@ void BarcodeMatcher::build_kmer_index() {
     tmp.reserve(whitelist_.size() * 8);
 
     for (uint32_t i = 0; i < static_cast<uint32_t>(whitelist_.size()); ++i) {
-        const char* bc = whitelist_[i].barcode;
-        int len = static_cast<int>(std::strlen(bc));
-
-        exact_index_[bc] = i;
+        const std::string& bc = whitelist_[i].barcode;
+        int len = static_cast<int>(bc.size());
+        exact_index_.try_emplace(bc, i); // keep first occurrence on duplicates
 
         if (len < k) continue;
-        for (int j = 0; j <= len - k; ++j)
-            tmp[kmer_hash(bc, j, k)].push_back(i);
+        for (int j = 0; j <= len - k; ++j) {
+            uint64_t h = 0;
+            if (kmer_hash_checked(bc.c_str(), j, k, h))
+                tmp[h].push_back(i);
+        }
     }
 
     // Pass 2: sort+dedup each bucket, lay out in flat array (CSR)
@@ -134,6 +164,7 @@ bool BarcodeMatcher::load_whitelist(const std::string& filename) {
             if (barcode[last-1] == '-' && std::isdigit((unsigned char)barcode[last]))
                 barcode.resize(last - 1);
         }
+        normalize_barcode(barcode);
         if (barcode.empty()) continue;
 
         BarcodeEntry e;
@@ -160,23 +191,38 @@ std::vector<uint32_t> BarcodeMatcher::kmer_candidates(const std::string& query) 
         return all;
     }
 
-    // Count k-mer hits per candidate using the flat CSR index
-    std::vector<uint8_t> hits(whitelist_.size(), 0);
-    for (int j = 0; j <= qlen - k; ++j) {
-        auto it = kmer_offsets_.find(kmer_hash(query.c_str(), j, k));
-        if (it != kmer_offsets_.end()) {
-            auto [begin, end] = it->second;
-            for (uint32_t x = begin; x < end; ++x) {
-                uint32_t idx = flat_candidates_[x];
-                if (hits[idx] < 255) hits[idx]++;
-            }
-        }
+    // Deduplicate candidates with thread-local epoch marks (no O(N) scan).
+    thread_local std::vector<uint32_t> seen_epoch;
+    thread_local uint32_t epoch = 1;
+
+    if (seen_epoch.size() < whitelist_.size()) {
+        seen_epoch.assign(whitelist_.size(), 0);
+        epoch = 1;
+    }
+    ++epoch;
+    if (epoch == 0) {
+        std::fill(seen_epoch.begin(), seen_epoch.end(), 0);
+        epoch = 1;
     }
 
     std::vector<uint32_t> cands;
     cands.reserve(256);
-    for (uint32_t i = 0; i < static_cast<uint32_t>(whitelist_.size()); ++i)
-        if (hits[i]) cands.push_back(i);
+    for (int j = 0; j <= qlen - k; ++j) {
+        uint64_t h = 0;
+        if (!kmer_hash_checked(query.c_str(), j, k, h)) continue;
+
+        auto it = kmer_offsets_.find(h);
+        if (it != kmer_offsets_.end()) {
+            auto [begin, end] = it->second;
+            for (uint32_t x = begin; x < end; ++x) {
+                uint32_t idx = flat_candidates_[x];
+                if (seen_epoch[idx] != epoch) {
+                    seen_epoch[idx] = epoch;
+                    cands.push_back(idx);
+                }
+            }
+        }
+    }
     return cands;
 }
 
@@ -184,9 +230,12 @@ BarcodeMatch BarcodeMatcher::match_barcode(const std::string& barcode) const {
     BarcodeMatch result;
     if (barcode.empty() || whitelist_.empty()) return result;
 
+    std::string query = barcode;
+    normalize_barcode(query);
+
     // Tier 1: exact match O(1)
     {
-        auto it = exact_index_.find(barcode);
+        auto it = exact_index_.find(query);
         if (it != exact_index_.end()) {
             uint32_t idx         = it->second;
             result.found          = true;
@@ -195,24 +244,42 @@ BarcodeMatch BarcodeMatcher::match_barcode(const std::string& barcode) const {
             result.num_candidates = 1;
             if (whitelist_[idx].has_sample)
                 result.sample = whitelist_[idx].sample;
+
+            // For min_margin > 1, verify there isn't another near-tie candidate.
+            if (config_.min_margin > 1) {
+                int best_other = std::numeric_limits<int>::max();
+                auto candidates = kmer_candidates(query);
+                for (uint32_t cidx : candidates) {
+                    if (cidx == idx) continue;
+                    const std::string& bc = whitelist_[cidx].barcode;
+                    int d = edit_distance_myers(query.c_str(),
+                                                static_cast<int>(query.size()),
+                                                bc.c_str(),
+                                                static_cast<int>(bc.size()));
+                    if (d < best_other) best_other = d;
+                    if (best_other < config_.min_margin) break;
+                }
+                if (best_other < config_.min_margin)
+                    result.ambiguous = true;
+            }
             return result;
         }
     }
 
     // Tier 2: k-mer filter
-    auto candidates = kmer_candidates(barcode);
+    auto candidates = kmer_candidates(query);
     if (candidates.empty()) return result;
 
     // Tier 3: Myers edit distance on raw char* — no string copies
     int best_dist   = std::numeric_limits<int>::max();
     int second_dist = std::numeric_limits<int>::max();
     std::vector<uint32_t> best_idx;
-    const int na = static_cast<int>(barcode.size());
+    const int na = static_cast<int>(query.size());
 
     for (uint32_t idx : candidates) {
-        const char* bc = whitelist_[idx].barcode;
-        int nb = static_cast<int>(std::strlen(bc));
-        int d  = edit_distance_myers(barcode.c_str(), na, bc, nb);
+        const std::string& bc = whitelist_[idx].barcode;
+        int nb = static_cast<int>(bc.size());
+        int d  = edit_distance_myers(query.c_str(), na, bc.c_str(), nb);
 
         if (d < best_dist) {
             second_dist = best_dist;
@@ -232,6 +299,12 @@ BarcodeMatch BarcodeMatcher::match_barcode(const std::string& barcode) const {
     result.matched_barcode = whitelist_[best_idx[0]].barcode;
     result.edit_distance   = best_dist;
     result.num_candidates  = static_cast<int>(best_idx.size());
+    if (result.num_candidates > 1)
+        result.ambiguous = true;
+    else if (second_dist != std::numeric_limits<int>::max() &&
+             (second_dist - best_dist) < config_.min_margin)
+        result.ambiguous = true;
+
     if (whitelist_[best_idx[0]].has_sample)
         result.sample = whitelist_[best_idx[0]].sample;
     return result;

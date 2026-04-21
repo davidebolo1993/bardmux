@@ -5,9 +5,29 @@
 #include <mutex>
 #include <atomic>
 #include <unordered_map>
-#include <memory>
+#include <vector>
 #include <zlib.h>
 #include "fastq_reader.h"
+
+// Possible per-read call status
+enum class CallStatus {
+    no_anchor,   // no valid anchor pair found
+    no_cb,       // anchors found but CB region too short
+    no_match,    // CB extracted, no whitelist match within max_edit_distance
+    ambiguous,   // ≥2 whitelist entries at same best edit distance
+    unique       // single unambiguous match
+};
+
+inline const char* status_str(CallStatus s) {
+    switch (s) {
+        case CallStatus::no_anchor:  return "no_anchor";
+        case CallStatus::no_cb:      return "no_cb";
+        case CallStatus::no_match:   return "no_match";
+        case CallStatus::ambiguous:  return "ambiguous";
+        case CallStatus::unique:     return "unique";
+    }
+    return "unknown";
+}
 
 struct ReportEntry {
     std::string read_id;
@@ -20,15 +40,21 @@ struct ReportEntry {
     bool        cb_matched     = false;
     std::string matched_cb;
     int         edit_distance  = -1;
+    int         n_candidates   = 0;    // number of whitelist entries at best distance
     std::string sample;
     bool        ambiguous      = false;
+    CallStatus  status         = CallStatus::no_anchor;
+};
+
+struct ReportChunkItem {
+    ReportEntry entry;
+    FastqRecord record;
 };
 
 struct ReporterConfig {
-    std::string output_file;   // TSV output (empty = stdout)
-    std::string split_dir;     // directory for per-sample FASTQ.gz (empty = disabled)
-    bool        compress = true;  // gzip-compress split files (.fastq.gz)
-    bool        verbose  = false;
+    std::string output_file;
+    std::string split_dir;
+    bool        verbose = false;
 };
 
 class ReportWriter {
@@ -36,10 +62,7 @@ public:
     explicit ReportWriter(const ReporterConfig& config = ReporterConfig());
     ~ReportWriter();
 
-    // Thread-safe: write TSV line + optionally stream read to per-sample FASTQ.gz
-    void add_entry(const ReportEntry& entry, const FastqRecord& record);
-
-    // Flush and close all output streams
+    void add_entries(std::vector<ReportChunkItem>&& items);
     bool finalize();
 
     int reads_with_anchors() const { return reads_with_anchors_.load(); }
@@ -48,16 +71,12 @@ public:
 
 private:
     ReporterConfig config_;
-
-    // TSV output
     std::ostream*  tsv_out_  = nullptr;
     std::ofstream  tsv_fout_;
     char           tsv_buf_[1 << 20]{};
 
-    // Per-sample gzip split files: sample_name -> gzFile
     std::unordered_map<std::string, gzFile> split_files_;
-
-    std::mutex mtx_;   // protects tsv_out_ writes AND split_files_ map
+    std::mutex mtx_;
 
     std::atomic<int> reads_with_anchors_{0};
     std::atomic<int> reads_matched_     {0};
@@ -65,6 +84,7 @@ private:
 
     bool   open_tsv_output();
     void   write_tsv_header();
+    static void append_tsv_line(std::string& out, const ReportEntry& e);
     gzFile get_or_open_split(const std::string& sample);
     void   write_fastq_gz(gzFile gz, const FastqRecord& rec);
     bool   ensure_dir(const std::string& path);

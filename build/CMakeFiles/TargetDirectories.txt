@@ -1,0 +1,8 @@
+/Users/davide.bolognini/bardmux/build/CMakeFiles/bardmux.dir
+/Users/davide.bolognini/bardmux/build/CMakeFiles/test.dir
+/Users/davide.bolognini/bardmux/build/CMakeFiles/edit_cache.dir
+/Users/davide.bolognini/bardmux/build/CMakeFiles/rebuild_cache.dir
+/Users/davide.bolognini/bardmux/build/CMakeFiles/list_install_components.dir
+/Users/davide.bolognini/bardmux/build/CMakeFiles/install.dir
+/Users/davide.bolognini/bardmux/build/CMakeFiles/install/local.dir
+/Users/davide.bolognini/bardmux/build/CMakeFiles/install/strip.dir
