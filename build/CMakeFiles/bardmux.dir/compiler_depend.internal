@@ -3072,6 +3072,7 @@ CMakeFiles/bardmux.dir/src/main.cpp.o
  /Users/davide.bolognini/bardmux/src/anchor_finder.h
  /Users/davide.bolognini/bardmux/src/barcode_matcher.h
  /Users/davide.bolognini/bardmux/src/fastq_reader.h
+ /Users/davide.bolognini/bardmux/src/progress.h
  /Users/davide.bolognini/bardmux/src/report_writer.h
  /Users/davide.bolognini/bardmux/src/thread_pool.h
 

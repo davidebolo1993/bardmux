@@ -65,16 +65,6 @@ CMAKE_BINARY_DIR = /Users/davide.bolognini/bardmux/build
 #=============================================================================
 # Targets provided globally by CMake.
 
-# Special rule for the target test
-test:
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "Running tests..."
-	/opt/homebrew/bin/ctest $(ARGS)
-.PHONY : test
-
-# Special rule for the target test
-test/fast: test
-.PHONY : test/fast
-
 # Special rule for the target edit_cache
 edit_cache:
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "Running CMake cache editor..."
@@ -183,19 +173,6 @@ bardmux: cmake_check_build_system
 bardmux/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bardmux.dir/build.make CMakeFiles/bardmux.dir/build
 .PHONY : bardmux/fast
-
-#=============================================================================
-# Target rules for targets named validate_test_data
-
-# Build rule for target.
-validate_test_data: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 validate_test_data
-.PHONY : validate_test_data
-
-# fast build rule for target.
-validate_test_data/fast:
-	$(MAKE) $(MAKESILENT) -f test/CMakeFiles/validate_test_data.dir/build.make test/CMakeFiles/validate_test_data.dir/build
-.PHONY : validate_test_data/fast
 
 src/anchor_finder.o: src/anchor_finder.cpp.o
 .PHONY : src/anchor_finder.o
@@ -353,8 +330,6 @@ help:
 	@echo "... install/strip"
 	@echo "... list_install_components"
 	@echo "... rebuild_cache"
-	@echo "... test"
-	@echo "... validate_test_data"
 	@echo "... bardmux"
 	@echo "... src/anchor_finder.o"
 	@echo "... src/anchor_finder.i"

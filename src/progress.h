@@ -2,115 +2,112 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
-#include <string>
 #include <unistd.h>   // isatty
 
 class ProgressTracker {
 public:
-    explicit ProgressTracker(int interval = 100000)
+    explicit ProgressTracker(long interval = 100000)
         : interval_(interval),
           t_start_(std::chrono::steady_clock::now()),
           tty_(isatty(fileno(stderr)))
     {}
 
-    // Called by workers (thread-safe, lock-free)
+    // Called by workers (thread-safe, lock-free).
     void record_read(bool anchor_found,
                      bool cb_matched,
-                     bool exact_match,   // edit_distance == 0
+                     bool exact_match,
                      bool ambiguous,
-                     bool no_donor)      // anchor+CB found but no sample label
+                     bool no_donor)
     {
-        ++total_;
-        if (anchor_found)  ++with_anchor_;
-        if (cb_matched)    ++cb_matched_;
-        if (exact_match)   ++exact_;
-        if (ambiguous)     ++ambiguous_;
-        if (no_donor)      ++no_donor_;
+        long cur = ++total_;
+        if (anchor_found) ++with_anchor_;
+        if (cb_matched)   ++cb_matched_;
+        if (exact_match)  ++exact_;
+        if (ambiguous)    ++ambiguous_;
+        if (no_donor)     ++no_donor_;
 
-        // Print every `interval_` reads (only one thread wins the CAS)
-        long cur = total_.load(std::memory_order_relaxed);
-        if (cur % interval_ == 0) {
-            long expected = cur;
-            if (last_printed_.compare_exchange_strong(expected, cur,
+        // Fire whenever we cross the next multiple of interval_.
+        // Use a threshold: if cur / interval_ > last_milestone, try to claim it.
+        long milestone = cur / interval_;
+        long prev = last_milestone_.load(std::memory_order_relaxed);
+        if (milestone > prev) {
+            // One thread wins the CAS and prints; others skip
+            if (last_milestone_.compare_exchange_strong(prev, milestone,
                     std::memory_order_relaxed, std::memory_order_relaxed))
-                print(cur, false);
+                print_progress(cur, false);
         }
     }
 
-    // Final summary — always printed
-    void finalize() { print(total_.load(), true); }
+    void finalize() { print_progress(total_.load(), true); }
 
 private:
-    int  interval_;
-    bool tty_;
+    long  interval_;
+    bool  tty_;
     std::chrono::steady_clock::time_point t_start_;
 
-    std::atomic<long> total_      {0};
-    std::atomic<long> with_anchor_{0};
-    std::atomic<long> cb_matched_ {0};
-    std::atomic<long> exact_      {0};
-    std::atomic<long> ambiguous_  {0};
-    std::atomic<long> no_donor_   {0};
-    std::atomic<long> last_printed_{-1};
+    std::atomic<long> total_       {0};
+    std::atomic<long> with_anchor_ {0};
+    std::atomic<long> cb_matched_  {0};
+    std::atomic<long> exact_       {0};
+    std::atomic<long> ambiguous_   {0};
+    std::atomic<long> no_donor_    {0};
+    std::atomic<long> last_milestone_{0};
 
-    void print(long n, bool final) const {
+    void print_progress(long n, bool final) const {
         if (n == 0) return;
 
-        auto now     = std::chrono::steady_clock::now();
-        double secs  = std::chrono::duration<double>(now - t_start_).count();
-        double rate  = n / (secs > 0 ? secs : 1.0);
+        auto now    = std::chrono::steady_clock::now();
+        double secs = std::chrono::duration<double>(now - t_start_).count();
+        double rate = n / (secs > 0.001 ? secs : 0.001);
 
-        long  anchor   = with_anchor_.load();
-        long  matched  = cb_matched_.load();
-        long  exact    = exact_.load();
-        long  approx   = matched - exact;
-        long  ambig    = ambiguous_.load();
-        long  nodonor  = no_donor_.load();
-        long  nomatch  = anchor - matched - ambig;
+        long anchor  = with_anchor_.load();
+        long matched = cb_matched_.load();
+        long ex      = exact_.load();
+        long approx  = matched - ex;
+        long ambig   = ambiguous_.load();
+        long nodon   = no_donor_.load();
+        long nomatch = anchor - matched - ambig;
 
-        // Percentages vs total reads
         auto pct = [&](long x) -> double {
             return n > 0 ? 100.0 * x / n : 0.0;
         };
 
-        char buf[512];
         if (final) {
-            std::snprintf(buf, sizeof(buf),
+            std::fprintf(stderr,
+                "%s"   // clear the in-place line if on TTY
                 "\n"
-                "┌─────────────────────── bardmux summary ───────────────────────────┐\n"
-                "│ Reads processed   : %10ld   (%.0f reads/sec, %.1f s total)  \n"
-                "│ Anchors found     : %10ld   (%5.1f%%)                        \n"
-                "│ CB matched        : %10ld   (%5.1f%%)                        \n"
-                "│   ├─ exact (d=0)  : %10ld   (%5.1f%%)                        \n"
-                "│   └─ approx (d>0) : %10ld   (%5.1f%%)                        \n"
-                "│ Ambiguous calls   : %10ld   (%5.1f%%)                        \n"
-                "│ No donor label    : %10ld   (%5.1f%%)                        \n"
-                "│ No CB match       : %10ld   (%5.1f%%)                        \n"
-                "└────────────────────────────────────────────────────────────────────┘\n",
-                n, rate, secs,
+                "┌──────────────────────── bardmux summary ───────────────────────────┐\n"
+                "│  Reads processed   : %10ld   (%.0f reads/sec,  %.1f s total)\n"
+                "│  Anchors found     : %10ld   (%5.1f%%)\n"
+                "│  CB matched        : %10ld   (%5.1f%%)\n"
+                "│    ├─ exact  (d=0) : %10ld   (%5.1f%%)\n"
+                "│    └─ approx (d>0) : %10ld   (%5.1f%%)\n"
+                "│  Ambiguous calls   : %10ld   (%5.1f%%)\n"
+                "│  No donor label    : %10ld   (%5.1f%%)\n"
+                "│  No CB match       : %10ld   (%5.1f%%)\n"
+                "└─────────────────────────────────────────────────────────────────────┘\n",
+                tty_ ? "\r\033[2K" : "",   // erase current line on TTY
+                n,    rate, secs,
                 anchor,  pct(anchor),
                 matched, pct(matched),
-                exact,   pct(exact),
+                ex,      pct(ex),
                 approx,  pct(approx),
                 ambig,   pct(ambig),
-                nodonor, pct(nodonor),
+                nodon,   pct(nodon),
                 nomatch, pct(nomatch));
         } else {
+            char buf[256];
             std::snprintf(buf, sizeof(buf),
-                "[bardmux] %8ld reads | anchors %5.1f%% | CB matched %5.1f%% "
-                "(exact %5.1f%% approx %5.1f%%) | ambig %5.1f%% | %.0f rd/s",
-                n,
-                pct(anchor),
-                pct(matched),
-                pct(exact),
-                pct(approx),
-                pct(ambig),
-                rate);
-        }
+                "[bardmux] %9ld reads | anchors %5.1f%% | matched %5.1f%% "
+                "(d=0: %5.1f%% d>0: %5.1f%%) | ambig %4.1f%% | %7.0f rd/s | %.0fs",
+                n, pct(anchor), pct(matched), pct(ex), pct(approx),
+                pct(ambig), rate, secs);
 
-        if (tty_ && !final)
-            std::fprintf(stderr, "\r%-120s", buf);   // overwrite in place on TTY
-        else
-            std::fprintf(stderr, "%s\n", buf);
+            if (tty_)
+                std::fprintf(stderr, "\r%-140s", buf);  // overwrite in place
+            else
+                std::fprintf(stderr, "%s\n", buf);
+        }
+        std::fflush(stderr);
     }
 };

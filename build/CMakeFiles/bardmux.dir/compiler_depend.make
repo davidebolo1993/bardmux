@@ -3068,6 +3068,7 @@ CMakeFiles/bardmux.dir/src/main.cpp.o: /Users/davide.bolognini/bardmux/src/main.
   /Users/davide.bolognini/bardmux/src/anchor_finder.h \
   /Users/davide.bolognini/bardmux/src/barcode_matcher.h \
   /Users/davide.bolognini/bardmux/src/fastq_reader.h \
+  /Users/davide.bolognini/bardmux/src/progress.h \
   /Users/davide.bolognini/bardmux/src/report_writer.h \
   /Users/davide.bolognini/bardmux/src/thread_pool.h
 
@@ -4751,6 +4752,8 @@ CMakeFiles/bardmux.dir/src/thread_pool.cpp.o: /Users/davide.bolognini/bardmux/sr
 /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/sys/_types/_s_ifmt.h:
 
 /Users/davide.bolognini/bardmux/src/report_writer.h:
+
+/Users/davide.bolognini/bardmux/src/progress.h:
 
 /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/thread:
 

@@ -76,27 +76,7 @@ preinstall:
 
 # The main recursive "clean" target.
 clean: CMakeFiles/bardmux.dir/clean
-clean: test/clean
 .PHONY : clean
-
-#=============================================================================
-# Directory level rules for directory test
-
-# Recursive "all" directory target.
-test/all:
-.PHONY : test/all
-
-# Recursive "codegen" directory target.
-test/codegen:
-.PHONY : test/codegen
-
-# Recursive "preinstall" directory target.
-test/preinstall:
-.PHONY : test/preinstall
-
-# Recursive "clean" directory target.
-test/clean: test/CMakeFiles/validate_test_data.dir/clean
-.PHONY : test/clean
 
 #=============================================================================
 # Target rules for target CMakeFiles/bardmux.dir
@@ -129,38 +109,6 @@ CMakeFiles/bardmux.dir/codegen:
 CMakeFiles/bardmux.dir/clean:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bardmux.dir/build.make CMakeFiles/bardmux.dir/clean
 .PHONY : CMakeFiles/bardmux.dir/clean
-
-#=============================================================================
-# Target rules for target test/CMakeFiles/validate_test_data.dir
-
-# All Build rule for target.
-test/CMakeFiles/validate_test_data.dir/all:
-	$(MAKE) $(MAKESILENT) -f test/CMakeFiles/validate_test_data.dir/build.make test/CMakeFiles/validate_test_data.dir/depend
-	$(MAKE) $(MAKESILENT) -f test/CMakeFiles/validate_test_data.dir/build.make test/CMakeFiles/validate_test_data.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/Users/davide.bolognini/bardmux/build/CMakeFiles --progress-num= "Built target validate_test_data"
-.PHONY : test/CMakeFiles/validate_test_data.dir/all
-
-# Build rule for subdir invocation for target.
-test/CMakeFiles/validate_test_data.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /Users/davide.bolognini/bardmux/build/CMakeFiles 0
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test/CMakeFiles/validate_test_data.dir/all
-	$(CMAKE_COMMAND) -E cmake_progress_start /Users/davide.bolognini/bardmux/build/CMakeFiles 0
-.PHONY : test/CMakeFiles/validate_test_data.dir/rule
-
-# Convenience name for target.
-validate_test_data: test/CMakeFiles/validate_test_data.dir/rule
-.PHONY : validate_test_data
-
-# codegen rule for target.
-test/CMakeFiles/validate_test_data.dir/codegen:
-	$(MAKE) $(MAKESILENT) -f test/CMakeFiles/validate_test_data.dir/build.make test/CMakeFiles/validate_test_data.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/Users/davide.bolognini/bardmux/build/CMakeFiles --progress-num= "Finished codegen for target validate_test_data"
-.PHONY : test/CMakeFiles/validate_test_data.dir/codegen
-
-# clean rule for target.
-test/CMakeFiles/validate_test_data.dir/clean:
-	$(MAKE) $(MAKESILENT) -f test/CMakeFiles/validate_test_data.dir/build.make test/CMakeFiles/validate_test_data.dir/clean
-.PHONY : test/CMakeFiles/validate_test_data.dir/clean
 
 #=============================================================================
 # Special targets to cleanup operation of make.
