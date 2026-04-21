@@ -20,6 +20,7 @@ struct Config {
     std::string anchor1           = "CTACACGACGCTCTTCCGATCT";
     std::string anchor2           = "TTTCTTATATGGG";
     int         max_anchor_errors = 3;
+    int         max_anchor_edits  = -1;
     int         cb_length         = 16;
     int         umi_length        = 12;
     int         anchor_gap_slack  = 20;
@@ -46,6 +47,7 @@ void print_usage(const char* prog) {
         << "  -A SEQ         Anchor 1  [CTACACGACGCTCTTCCGATCT]\n"
         << "  --anchor2 SEQ  Anchor 2  [TTTCTTATATGGG]\n"
         << "  -E INT         Max anchor mismatches [3]\n"
+        << "  --anchor-edits INT  Max anchor edit distance (indel-aware, disabled by default)\n"
         << "  -C INT         CB length bp [16]\n"
         << "  -U INT         UMI length bp [12]\n"
         << "  --gap-slack INT  Extra bp allowed between anchors [20]\n"
@@ -75,6 +77,7 @@ bool parse_arguments(int argc, char** argv, Config& cfg) {
         else if (a=="-A"  && i+1<argc) cfg.anchor1           = argv[++i];
         else if (a=="--anchor2"&&i+1<argc) cfg.anchor2       = argv[++i];
         else if (a=="-E"  && i+1<argc) cfg.max_anchor_errors = std::stoi(argv[++i]);
+        else if (a=="--anchor-edits" && i+1<argc) cfg.max_anchor_edits = std::stoi(argv[++i]);
         else if (a=="-C"  && i+1<argc) cfg.cb_length         = std::stoi(argv[++i]);
         else if (a=="-U"  && i+1<argc) cfg.umi_length        = std::stoi(argv[++i]);
         else if (a=="--gap-slack" && i+1<argc) cfg.anchor_gap_slack = std::stoi(argv[++i]);
@@ -94,6 +97,7 @@ bool parse_arguments(int argc, char** argv, Config& cfg) {
         print_usage(argv[0]); return false;
     }
     if (cfg.max_anchor_errors < 0 || cfg.max_edit_distance < 0 ||
+        cfg.max_anchor_edits < -1 ||
         cfg.cb_length <= 0 || cfg.umi_length < 0 || cfg.kmer_length <= 0 ||
         cfg.num_threads <= 0 || cfg.batch_size <= 0 ||
         cfg.progress_every < 0 || cfg.min_margin < 0 || cfg.anchor_gap_slack < 0) {
@@ -180,13 +184,18 @@ int main(int argc, char** argv) {
                       << "Barcodes:  " << cfg.barcode_file << "\n"
                       << "Output:    " << (cfg.output_file.empty() ? "stdout" : cfg.output_file) << "\n"
                       << "Split dir: " << (cfg.split_dir.empty()   ? "(none)"  : cfg.split_dir)  << "\n"
-                      << "Threads:   " << cfg.num_threads  << "\n";
+                      << "Threads:   " << cfg.num_threads  << "\n"
+                      << "Anchor mode: " << (cfg.max_anchor_edits >= 0 ? "edit distance" : "mismatch")
+                      << (cfg.max_anchor_edits >= 0 ? (" (k=" + std::to_string(cfg.max_anchor_edits) + ")")
+                                                    : (" (k=" + std::to_string(cfg.max_anchor_errors) + ")"))
+                      << "\n";
         }
 
         AnchorConfig acfg;
         acfg.anchor1    = cfg.anchor1;
         acfg.anchor2    = cfg.anchor2;
         acfg.max_errors = cfg.max_anchor_errors;
+        acfg.max_edits  = cfg.max_anchor_edits;
         acfg.cb_length  = cfg.cb_length;
         acfg.umi_length = cfg.umi_length;
         acfg.gap_slack  = cfg.anchor_gap_slack;

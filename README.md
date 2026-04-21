@@ -52,10 +52,13 @@ Anchor detection:
 - `-A SEQ` anchor1 sequence (default `CTACACGACGCTCTTCCGATCT`)
 - `--anchor2 SEQ` anchor2 sequence (default `TTTCTTATATGGG`)
 - `-E INT` max mismatches per anchor (default `3`)
+- `--anchor-edits INT` max anchor edit distance (indel-aware; default disabled)
 - `-C INT` CB length (default `16`)
 - `-U INT` UMI length (default `12`)
 - `--gap-slack INT` extra allowed bp between anchors beyond `CB+UMI` (default `20`)
 - `--no-fallback` strict anchor spacing: only `CB+UMI` window (no extra slack)
+
+If `--anchor-edits` is set, anchor matching uses edit distance (indels allowed) and `-E` is not used.
 
 Barcode matching:
 - `-e INT` max edit distance to whitelist (default `2`)
@@ -98,7 +101,7 @@ For unassigned calls, `matched_cb` and `sample` are emitted as `unassigned`.
 ## Algorithm Summary
 
 1. Anchor detection (FWD then RC):
-- Search anchor pairs with mismatch threshold `-E`.
+- Search anchor pairs with mismatch threshold `-E`, or with bounded edit distance when `--anchor-edits` is enabled.
 - Enforce biological spacing constraint:
   - minimum region: `CB length`
   - maximum region: `CB + UMI + gap_slack` (or strict `CB+UMI` with `--no-fallback`)
