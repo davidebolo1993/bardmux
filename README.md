@@ -160,6 +160,7 @@ Example:
   --tmp /scratch/bardmux_cmp_tmp \
   --threads 24 \
   --sort-mem 50% \
+  --progress-rows 5000000 \
   --out cb_compare_summary.tsv \
   --disagreements cb_compare_disagreements.tsv \
   --wf-only-status cb_compare_wf_only_status.tsv \
@@ -174,6 +175,11 @@ Main reported metrics:
 - `wf_vs_bardmux_assigned_coverage_pct`: fraction of bardmux-assigned reads also assigned by wf
 - `wf_only_bardmux_status` table: among wf-assigned reads that bardmux does not assign, how bardmux categorized them (`no_anchor`, `no_match`, `no_cb`, etc.)
 - duplicate/conflict counters (same read ID with multiple CBs in either table)
+
+Progress output:
+- phase-level progress is printed to `stderr` (normalization, sorting, merge join, wf-only status pass)
+- use `--progress-rows` to control update frequency
+- use `--no-progress` to silence progress messages
 
 For compressed wf files, process substitution works well on Linux:
 

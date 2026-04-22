@@ -1,7 +1,9 @@
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -12,6 +14,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 
@@ -26,8 +29,10 @@ struct Config {
     std::string sort_mem;
     int         threads = 1;
     int         max_disagreements = 20;
+    uint64_t    progress_rows = 5000000ULL;
     bool        strip_wf_suffix = true;
     bool        keep_temp = false;
+    bool        progress = true;
 };
 
 struct BardmuxParseStats {
@@ -87,6 +92,92 @@ struct JoinStats {
     std::vector<Disagreement> disagreement_examples;
 };
 
+static std::string fmt_u64(uint64_t x) {
+    std::string s = std::to_string(x);
+    int insert_pos = static_cast<int>(s.size()) - 3;
+    while (insert_pos > 0) {
+        s.insert(static_cast<std::size_t>(insert_pos), ",");
+        insert_pos -= 3;
+    }
+    return s;
+}
+
+class PhaseProgress {
+public:
+    PhaseProgress(const std::string& phase,
+                  bool enabled,
+                  uint64_t every_rows,
+                  uint64_t total_bytes = 0)
+        : phase_(phase),
+          enabled_(enabled),
+          every_rows_(std::max<uint64_t>(1, every_rows)),
+          total_bytes_(total_bytes),
+          tty_(isatty(fileno(stderr))),
+          t0_(std::chrono::steady_clock::now())
+    {
+        if (enabled_) {
+            std::fprintf(stderr, "[compare] %s started\n", phase_.c_str());
+            std::fflush(stderr);
+        }
+    }
+
+    void tick_row(uint64_t bytes = 0) {
+        if (!enabled_) return;
+        ++rows_;
+        bytes_ += bytes;
+        if (rows_ - last_print_rows_ >= every_rows_) {
+            print(false);
+            last_print_rows_ = rows_;
+        }
+    }
+
+    void print_done(const std::string& suffix = "") {
+        if (!enabled_) return;
+        print(true, suffix);
+    }
+
+private:
+    std::string phase_;
+    bool enabled_;
+    uint64_t every_rows_;
+    uint64_t total_bytes_;
+    bool tty_;
+    uint64_t rows_ = 0;
+    uint64_t bytes_ = 0;
+    uint64_t last_print_rows_ = 0;
+    std::chrono::steady_clock::time_point t0_;
+
+    void print(bool final, const std::string& suffix = "") const {
+        auto now = std::chrono::steady_clock::now();
+        double sec = std::chrono::duration<double>(now - t0_).count();
+        if (sec < 1e-6) sec = 1e-6;
+        double rows_s = static_cast<double>(rows_) / sec;
+        double mb_s = (static_cast<double>(bytes_) / (1024.0 * 1024.0)) / sec;
+        double pct = (total_bytes_ > 0) ? (100.0 * static_cast<double>(bytes_) / static_cast<double>(total_bytes_)) : -1.0;
+
+        std::ostringstream oss;
+        oss << "[compare] " << phase_ << " | rows " << fmt_u64(rows_)
+            << " | " << std::fixed << std::setprecision(0) << rows_s << " rows/s";
+        if (bytes_ > 0) {
+            oss << " | " << std::setprecision(1) << mb_s << " MiB/s";
+        }
+        if (pct >= 0.0) {
+            if (pct > 100.0) pct = 100.0;
+            oss << " | " << std::setprecision(1) << pct << "%";
+        }
+        if (!suffix.empty()) oss << " | " << suffix;
+        std::string line = oss.str();
+
+        if (tty_ && !final) {
+            std::fprintf(stderr, "\r%-140s", line.c_str());
+        } else {
+            if (tty_ && final) std::fprintf(stderr, "\r\033[2K");
+            std::fprintf(stderr, "%s\n", line.c_str());
+        }
+        std::fflush(stderr);
+    }
+};
+
 static void usage(const char* prog) {
     std::cerr
         << "Usage: " << prog << " --bardmux ASSIGN.tsv --wf WF.tsv --tmp TMP_DIR [options]\n\n"
@@ -103,6 +194,8 @@ static void usage(const char* prog) {
         << "  --disagreements FILE   Write strict discordant examples to FILE\n"
         << "  --wf-only-status FILE  Write wf-only bardmux-status table to FILE\n"
         << "  --max-disagreements INT  Max discordant examples kept (default: 20)\n"
+        << "  --progress-rows INT   Progress update interval in rows (default: 5000000)\n"
+        << "  --no-progress         Disable progress messages\n"
         << "  --keep-temp         Keep intermediate files\n"
         << "  -h, --help          Show this help\n";
 }
@@ -162,6 +255,18 @@ static bool parse_int_safe(const std::string& s, int& out) {
     }
 }
 
+static bool parse_u64_safe(const std::string& s, uint64_t& out) {
+    try {
+        std::size_t pos = 0;
+        unsigned long long v = std::stoull(s, &pos);
+        if (pos != s.size()) return false;
+        out = static_cast<uint64_t>(v);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 static bool parse_args(int argc, char** argv, Config& cfg) {
     if (argc < 2) return false;
     for (int i = 1; i < argc; ++i) {
@@ -188,6 +293,12 @@ static bool parse_args(int argc, char** argv, Config& cfg) {
             if (!parse_int_safe(argv[++i], d)) return false;
             cfg.max_disagreements = std::max(0, d);
         }
+        else if (a == "--progress-rows" && i + 1 < argc) {
+            uint64_t p = 0;
+            if (!parse_u64_safe(argv[++i], p)) return false;
+            cfg.progress_rows = std::max<uint64_t>(1, p);
+        }
+        else if (a == "--no-progress") cfg.progress = false;
         else if (a == "--keep-temp") cfg.keep_temp = true;
         else {
             std::cerr << "Unknown or incomplete argument: " << a << "\n";
@@ -196,6 +307,13 @@ static bool parse_args(int argc, char** argv, Config& cfg) {
     }
     if (cfg.bardmux_file.empty() || cfg.wf_file.empty() || cfg.tmp_dir.empty()) return false;
     return true;
+}
+
+static uint64_t try_get_file_size(const fs::path& p) {
+    std::error_code ec;
+    const auto sz = fs::file_size(p, ec);
+    if (ec) return 0;
+    return static_cast<uint64_t>(sz);
 }
 
 static bool normalize_bardmux_file(const Config& cfg,
@@ -218,9 +336,11 @@ static bool normalize_bardmux_file(const Config& cfg,
         return false;
     }
 
+    PhaseProgress prog("normalize bardmux", cfg.progress, cfg.progress_rows, try_get_file_size(cfg.bardmux_file));
     std::string line;
     bool first = true;
     while (std::getline(in, line)) {
+        prog.tick_row(static_cast<uint64_t>(line.size() + 1));
         if (line.empty()) continue;
         ++stats.input_rows;
 
@@ -266,6 +386,10 @@ static bool normalize_bardmux_file(const Config& cfg,
         out_assigned << id << '\t' << matched_cb << '\t' << ed << '\n';
         ++stats.unique_assigned_rows;
     }
+    std::ostringstream sfx;
+    sfx << "unique_assigned=" << fmt_u64(stats.unique_assigned_rows)
+        << ", malformed=" << fmt_u64(stats.malformed_rows);
+    prog.print_done(sfx.str());
     return true;
 }
 
@@ -281,9 +405,11 @@ static bool normalize_wf_file(const Config& cfg, const fs::path& out_norm, WfPar
         return false;
     }
 
+    PhaseProgress prog("normalize wf", cfg.progress, cfg.progress_rows, try_get_file_size(cfg.wf_file));
     std::string line;
     bool first = true;
     while (std::getline(in, line)) {
+        prog.tick_row(static_cast<uint64_t>(line.size() + 1));
         if (line.empty()) continue;
         ++stats.input_rows;
 
@@ -320,10 +446,19 @@ static bool normalize_wf_file(const Config& cfg, const fs::path& out_norm, WfPar
         out << id << '\t' << cb << '\n';
         ++stats.assigned_rows;
     }
+    std::ostringstream sfx;
+    sfx << "assigned=" << fmt_u64(stats.assigned_rows)
+        << ", malformed=" << fmt_u64(stats.malformed_rows);
+    prog.print_done(sfx.str());
     return true;
 }
 
 static bool sort_file(const Config& cfg, const fs::path& in, const fs::path& out) {
+    auto t0 = std::chrono::steady_clock::now();
+    if (cfg.progress) {
+        std::cerr << "[compare] sort started: " << in << "\n";
+    }
+
     auto run_sort = [&](bool with_tuning) -> int {
         std::ostringstream cmd;
         cmd << "LC_ALL=C sort -k1,1 -T " << shell_quote(cfg.tmp_dir) << " ";
@@ -343,6 +478,11 @@ static bool sort_file(const Config& cfg, const fs::path& in, const fs::path& out
     if (rc != 0) {
         std::cerr << "Sort failed for file: " << in << "\n";
         return false;
+    }
+    if (cfg.progress) {
+        auto t1 = std::chrono::steady_clock::now();
+        double sec = std::chrono::duration<double>(t1 - t0).count();
+        std::cerr << "[compare] sort done: " << out << " (" << std::fixed << std::setprecision(1) << sec << " s)\n";
     }
     return true;
 }
@@ -444,6 +584,7 @@ static bool merge_join_assigned(const Config& cfg,
         std::cerr << "Cannot open assigned sorted intermediate files\n";
         return false;
     }
+    PhaseProgress prog("merge assigned", cfg.progress, cfg.progress_rows, 0);
 
     BardmuxAssignedRec ar;
     WfRec  br;
@@ -460,6 +601,7 @@ static bool merge_join_assigned(const Config& cfg,
                 ++js.bardmux_dup_ids;
                 if (!all_same_cb_bardmux(ga)) ++js.bardmux_dup_conflict;
             }
+            prog.tick_row();
             if (has_a) ar = std::move(next_a);
             continue;
         }
@@ -473,6 +615,7 @@ static bool merge_join_assigned(const Config& cfg,
                 ++js.wf_dup_ids;
                 if (!all_same_cb_wf(gb)) ++js.wf_dup_conflict;
             }
+            prog.tick_row();
             if (has_b) br = std::move(next_b);
             continue;
         }
@@ -518,6 +661,7 @@ static bool merge_join_assigned(const Config& cfg,
             }
         }
 
+        prog.tick_row();
         if (has_a) ar = std::move(next_a);
         if (has_b) br = std::move(next_b);
     }
@@ -531,6 +675,7 @@ static bool merge_join_assigned(const Config& cfg,
             ++js.bardmux_dup_ids;
             if (!all_same_cb_bardmux(ga)) ++js.bardmux_dup_conflict;
         }
+        prog.tick_row();
         if (has_a) ar = std::move(next_a);
     }
     while (has_b) {
@@ -543,9 +688,15 @@ static bool merge_join_assigned(const Config& cfg,
             ++js.wf_dup_ids;
             if (!all_same_cb_wf(gb)) ++js.wf_dup_conflict;
         }
+        prog.tick_row();
         if (has_b) br = std::move(next_b);
     }
 
+    std::ostringstream sfx;
+    sfx << "intersection=" << fmt_u64(js.both_ids)
+        << ", wf_only=" << fmt_u64(js.wf_only_ids)
+        << ", bardmux_only=" << fmt_u64(js.bardmux_only_ids);
+    prog.print_done(sfx.str());
     return true;
 }
 
@@ -561,7 +712,8 @@ static std::string collapse_status_group(const std::vector<BardmuxStatusRec>& gr
     return "multiple_statuses";
 }
 
-static bool count_wf_only_statuses(const fs::path& wf_only_ids_file,
+static bool count_wf_only_statuses(const Config& cfg,
+                                   const fs::path& wf_only_ids_file,
                                    const fs::path& bardmux_status_sorted,
                                    JoinStats& js) {
     std::ifstream wf_ids(wf_only_ids_file);
@@ -573,6 +725,7 @@ static bool count_wf_only_statuses(const fs::path& wf_only_ids_file,
 
     std::string wf_id;
     bool has_wf = static_cast<bool>(std::getline(wf_ids, wf_id));
+    PhaseProgress prog("wf-only status breakdown", cfg.progress, cfg.progress_rows, try_get_file_size(wf_only_ids_file));
 
     BardmuxStatusRec sr;
     bool has_st = read_next_bardmux_status(st, sr);
@@ -580,6 +733,7 @@ static bool count_wf_only_statuses(const fs::path& wf_only_ids_file,
     while (has_wf) {
         if (!has_st || wf_id < sr.id) {
             js.wf_only_status_counts["not_in_bardmux_table"]++;
+            prog.tick_row(static_cast<uint64_t>(wf_id.size() + 1));
             has_wf = static_cast<bool>(std::getline(wf_ids, wf_id));
             continue;
         }
@@ -595,11 +749,16 @@ static bool count_wf_only_statuses(const fs::path& wf_only_ids_file,
         BardmuxStatusRec next_sr;
         auto g = consume_group(std::move(sr), st, read_next_bardmux_status, has_st, next_sr);
         js.wf_only_status_counts[collapse_status_group(g)]++;
+        prog.tick_row(static_cast<uint64_t>(wf_id.size() + 1));
         if (has_st) sr = std::move(next_sr);
 
         has_wf = static_cast<bool>(std::getline(wf_ids, wf_id));
     }
 
+    std::ostringstream sfx;
+    sfx << "wf_only_ids=" << fmt_u64(js.wf_only_ids)
+        << ", status_bins=" << fmt_u64(static_cast<uint64_t>(js.wf_only_status_counts.size()));
+    prog.print_done(sfx.str());
     return true;
 }
 
@@ -733,7 +892,7 @@ int main(int argc, char** argv) {
 
     JoinStats js;
     if (!merge_join_assigned(cfg, bardmux_assigned_sorted, wf_sorted, wf_only_ids_file, js)) return 1;
-    if (!count_wf_only_statuses(wf_only_ids_file, bardmux_status_sorted, js)) return 1;
+    if (!count_wf_only_statuses(cfg, wf_only_ids_file, bardmux_status_sorted, js)) return 1;
 
     if (!cfg.out_file.empty()) {
         std::ofstream ofs(cfg.out_file);
