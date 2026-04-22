@@ -1,6 +1,7 @@
 #!/usr/bin/env Rscript
 
 args <- commandArgs(trailingOnly = TRUE)
+options(scipen = 999)
 
 usage <- function() {
   cat(
@@ -128,13 +129,13 @@ wf_vs_bardmux <- get_metric(metrics, "wf_vs_bardmux_assigned_coverage_pct", 0)
 
 out_png <- paste0(cfg$out_prefix, ".overview.png")
 png(out_png, width = 1800, height = 1300, res = 150)
-par(mfrow = c(2, 2), mar = c(6, 5, 4, 2) + 0.1)
+par(mfrow = c(2, 2), mar = c(7, 6, 4, 2) + 0.1, oma = c(0, 0, 2.5, 0), mgp = c(2.2, 0.7, 0))
 
 # Panel 1: Assigned-set composition
 counts1 <- c(intersection, bardmux_only, wf_only)
 names1 <- c("Intersection", "Bardmux only", "wf only")
 cols1 <- c("#2a9d8f", "#457b9d", "#e76f51")
-bp1 <- barplot(counts1, col = cols1, ylim = c(0, max(counts1, 1) * 1.28), las = 2,
+bp1 <- barplot(counts1, names.arg = names1, col = cols1, ylim = c(0, max(counts1, 1) * 1.28), las = 2,
                main = "Assigned Read-ID Set Composition", ylab = "Distinct read IDs")
 text(bp1, counts1, labels = format_count_pct(counts1), pos = 3, cex = 0.85)
 
@@ -142,9 +143,9 @@ text(bp1, counts1, labels = format_count_pct(counts1), pos = 3, cex = 0.85)
 counts2 <- c(strict_concordant, strict_discordant)
 names2 <- c("Concordant", "Discordant")
 cols2 <- c("#2a9d8f", "#d62828")
-bp2 <- barplot(counts2, col = cols2, ylim = c(0, max(counts2, 1) * 1.3), las = 2,
+bp2 <- barplot(counts2, names.arg = names2, col = cols2, ylim = c(0, max(counts2, 1) * 1.3), las = 2,
                main = sprintf("Strict CB Concordance (%.2f%%)", strict_concordance),
-               ylab = "Intersection IDs (strict-comparable)")
+               ylab = "Strict-comparable read IDs")
 text(bp2, counts2, labels = format_count_pct(counts2), pos = 3, cex = 0.85)
 
 # Panel 3: wf-only status breakdown
@@ -154,7 +155,7 @@ if (!is.null(wf_status_df) && nrow(wf_status_df) > 0) {
   counts3 <- as.numeric(wf_status_df$count)
   labels3 <- wf_status_df$wf_only_bardmux_status
   cols3 <- rep("#6c757d", length(counts3))
-  bp3 <- barplot(counts3, col = cols3, ylim = c(0, max(counts3, 1) * 1.32), las = 2,
+  bp3 <- barplot(counts3, names.arg = labels3, col = cols3, ylim = c(0, max(counts3, 1) * 1.32), las = 2,
                  main = "wf-only Assigned IDs: bardmux Status", ylab = "Distinct read IDs")
   pct3 <- ifelse(is.na(wf_status_df$pct_of_wf_only), 0, wf_status_df$pct_of_wf_only)
   lab3 <- sprintf("%s\n(%.1f%%)", format(counts3, big.mark = ",", scientific = FALSE), pct3)
@@ -170,7 +171,7 @@ if (!is.null(edit_df) && nrow(edit_df) > 0) {
   edit_df <- edit_df[order(edit_df$strict_edit_distance), , drop = FALSE]
   mat <- rbind(as.numeric(edit_df$concordant_ids), as.numeric(edit_df$discordant_ids))
   colnames(mat) <- as.character(edit_df$strict_edit_distance)
-  bp4 <- barplot(mat, beside = FALSE, col = c("#2a9d8f", "#d62828"),
+  bp4 <- barplot(mat, beside = FALSE, col = c("#2a9d8f", "#d62828"), names.arg = colnames(mat),
                  main = "Strict Concordance by bardmux Edit Distance",
                  xlab = "Edit distance", ylab = "Read IDs")
   legend("topright", legend = c("Concordant", "Discordant"),
@@ -183,7 +184,7 @@ if (!is.null(edit_df) && nrow(edit_df) > 0) {
 
 mtext(sprintf("%s | Jaccard: %.2f%% | bardmux_vs_wf: %.2f%% | wf_vs_bardmux: %.2f%%",
               cfg$title, jaccard, bardmux_vs_wf, wf_vs_bardmux),
-      side = 1, outer = FALSE, line = -1.2, cex = 0.9)
+      side = 3, outer = TRUE, line = 0.3, cex = 0.9)
 
 dev.off()
 
