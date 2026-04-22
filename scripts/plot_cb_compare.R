@@ -261,7 +261,7 @@ if (!is.null(edit_df) && nrow(edit_df) > 0) {
 out_png <- paste0(cfg$out_prefix, ".overview.png")
 
 # Arrange 2x2 without extra dependencies beyond ggplot2 + base grid.
-png(out_png, width = 1900, height = 1400, res = 160)
+png(out_png, width = 2300, height = 1700, res = 160)
 grid::grid.newpage()
 layout <- grid::grid.layout(nrow = 3, ncol = 2,
                             heights = grid::unit(c(0.08, 0.46, 0.46), "npc"),
