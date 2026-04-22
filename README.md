@@ -193,13 +193,19 @@ For compressed wf files, process substitution works well on Linux:
 
 ### Plot Summary (R)
 
-Use the provided script to generate an annotated overview PNG with counts and percentages:
+Use the provided `ggplot2` script to generate an annotated overview PNG with counts and percentages:
 
 ```bash
 Rscript scripts/plot_cb_compare.R \
   --summary cb_compare_summary.tsv \
   --out-prefix cb_compare \
   --title "CCH_797 bardmux vs wf-single-cell"
+```
+
+If needed, install dependency:
+
+```bash
+R -q -e 'install.packages("ggplot2", repos="https://cloud.r-project.org")'
 ```
 
 This produces:

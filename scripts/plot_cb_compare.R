@@ -1,7 +1,8 @@
 #!/usr/bin/env Rscript
 
-args <- commandArgs(trailingOnly = TRUE)
 options(scipen = 999)
+
+args <- commandArgs(trailingOnly = TRUE)
 
 usage <- function() {
   cat(
@@ -12,7 +13,7 @@ usage <- function() {
     "\n",
     "Optional:\n",
     "  --out-prefix STR   Output prefix (default: cb_compare)\n",
-    "  --title STR        Figure title prefix\n",
+    "  --title STR        Figure title\n",
     sep = ""
   )
 }
@@ -81,10 +82,17 @@ get_metric <- function(metrics, key, default = NA_real_) {
   as.numeric(metrics$value[[idx[[1]]]])
 }
 
-format_count_pct <- function(counts) {
-  total <- sum(counts)
+label_count_pct <- function(counts, total = NULL) {
+  if (is.null(total)) total <- sum(counts)
   pct <- if (total > 0) 100 * counts / total else rep(0, length(counts))
   sprintf("%s\n(%.1f%%)", format(counts, big.mark = ",", scientific = FALSE), pct)
+}
+
+make_empty_plot <- function(ggplot2, title, subtitle, text) {
+  ggplot2::ggplot() +
+    ggplot2::theme_void(base_size = 13) +
+    ggplot2::labs(title = title, subtitle = subtitle) +
+    ggplot2::annotate("text", x = 0, y = 0, label = text, size = 4)
 }
 
 cfg <- tryCatch(parse_args(args), error = function(e) {
@@ -94,6 +102,10 @@ cfg <- tryCatch(parse_args(args), error = function(e) {
 if (is.null(cfg)) {
   usage()
   quit(status = 1)
+}
+
+if (!requireNamespace("ggplot2", quietly = TRUE)) {
+  stop("Package 'ggplot2' is required. Install with install.packages('ggplot2').")
 }
 
 lines <- readLines(cfg$summary, warn = FALSE)
@@ -120,6 +132,7 @@ if (!is.null(wf_status_block) && length(wf_status_block) > 1) {
 intersection <- get_metric(metrics, "intersection_assigned_ids", 0)
 bardmux_only <- get_metric(metrics, "bardmux_only_assigned_ids", 0)
 wf_only <- get_metric(metrics, "wf_only_assigned_ids", 0)
+strict_comparable <- get_metric(metrics, "strict_comparable_ids", 0)
 strict_concordant <- get_metric(metrics, "strict_concordant_ids", 0)
 strict_discordant <- get_metric(metrics, "strict_discordant_ids", 0)
 strict_concordance <- get_metric(metrics, "strict_concordance_pct", 0)
@@ -127,64 +140,142 @@ jaccard <- get_metric(metrics, "assigned_id_jaccard_pct", 0)
 bardmux_vs_wf <- get_metric(metrics, "bardmux_vs_wf_assigned_coverage_pct", 0)
 wf_vs_bardmux <- get_metric(metrics, "wf_vs_bardmux_assigned_coverage_pct", 0)
 
-out_png <- paste0(cfg$out_prefix, ".overview.png")
-png(out_png, width = 1800, height = 1300, res = 150)
-par(mfrow = c(2, 2), mar = c(7, 6, 4, 2) + 0.1, oma = c(0, 0, 2.5, 0), mgp = c(2.2, 0.7, 0))
+# Panel 1
+p1_df <- data.frame(
+  category = factor(c("Intersection", "Bardmux only", "wf only"),
+                    levels = c("Intersection", "Bardmux only", "wf only")),
+  count = c(intersection, bardmux_only, wf_only)
+)
+p1_df$label <- label_count_pct(p1_df$count)
 
-# Panel 1: Assigned-set composition
-counts1 <- c(intersection, bardmux_only, wf_only)
-names1 <- c("Intersection", "Bardmux only", "wf only")
-cols1 <- c("#2a9d8f", "#457b9d", "#e76f51")
-bp1 <- barplot(counts1, names.arg = names1, col = cols1, ylim = c(0, max(counts1, 1) * 1.28), las = 2,
-               main = "Assigned Read-ID Set Composition", ylab = "Distinct read IDs")
-text(bp1, counts1, labels = format_count_pct(counts1), pos = 3, cex = 0.85)
+p1 <- ggplot2::ggplot(p1_df, ggplot2::aes(x = category, y = count, fill = category)) +
+  ggplot2::geom_col(width = 0.75, color = "#1f1f1f") +
+  ggplot2::geom_text(ggplot2::aes(label = label), vjust = -0.25, size = 3.8, lineheight = 0.95) +
+  ggplot2::scale_fill_manual(values = c("Intersection" = "#2a9d8f", "Bardmux only" = "#457b9d", "wf only" = "#e76f51")) +
+  ggplot2::scale_y_continuous(labels = scales::comma, expand = ggplot2::expansion(mult = c(0, 0.16))) +
+  ggplot2::labs(
+    title = "Assigned Read-ID Set Composition",
+    subtitle = sprintf("Jaccard %.2f%% | bardmux_vs_wf %.2f%% | wf_vs_bardmux %.2f%%", jaccard, bardmux_vs_wf, wf_vs_bardmux),
+    x = NULL,
+    y = "Distinct read IDs"
+  ) +
+  ggplot2::theme_bw(base_size = 13) +
+  ggplot2::theme(
+    legend.position = "none",
+    axis.text.x = ggplot2::element_text(angle = 20, hjust = 1),
+    plot.title = ggplot2::element_text(face = "bold")
+  )
 
-# Panel 2: Strict concordance
-counts2 <- c(strict_concordant, strict_discordant)
-names2 <- c("Concordant", "Discordant")
-cols2 <- c("#2a9d8f", "#d62828")
-bp2 <- barplot(counts2, names.arg = names2, col = cols2, ylim = c(0, max(counts2, 1) * 1.3), las = 2,
-               main = sprintf("Strict CB Concordance (%.2f%%)", strict_concordance),
-               ylab = "Strict-comparable read IDs")
-text(bp2, counts2, labels = format_count_pct(counts2), pos = 3, cex = 0.85)
+# Panel 2
+p2_df <- data.frame(
+  category = factor(c("Concordant", "Discordant"), levels = c("Concordant", "Discordant")),
+  count = c(strict_concordant, strict_discordant)
+)
+p2_df$label <- label_count_pct(p2_df$count, total = strict_comparable)
 
-# Panel 3: wf-only status breakdown
+p2 <- ggplot2::ggplot(p2_df, ggplot2::aes(x = category, y = count, fill = category)) +
+  ggplot2::geom_col(width = 0.7, color = "#1f1f1f") +
+  ggplot2::geom_text(ggplot2::aes(label = label), vjust = -0.25, size = 3.8, lineheight = 0.95) +
+  ggplot2::scale_fill_manual(values = c("Concordant" = "#2a9d8f", "Discordant" = "#d62828")) +
+  ggplot2::scale_y_continuous(labels = scales::comma, expand = ggplot2::expansion(mult = c(0, 0.16))) +
+  ggplot2::labs(
+    title = sprintf("Strict CB Concordance (%.2f%%)", strict_concordance),
+    subtitle = sprintf("Strict-comparable IDs: %s", format(strict_comparable, big.mark = ",", scientific = FALSE)),
+    x = NULL,
+    y = "Strict-comparable read IDs"
+  ) +
+  ggplot2::theme_bw(base_size = 13) +
+  ggplot2::theme(
+    legend.position = "none",
+    plot.title = ggplot2::element_text(face = "bold")
+  )
+
+# Panel 3
 if (!is.null(wf_status_df) && nrow(wf_status_df) > 0) {
   ord <- order(wf_status_df$count, decreasing = TRUE)
   wf_status_df <- wf_status_df[ord, , drop = FALSE]
-  counts3 <- as.numeric(wf_status_df$count)
-  labels3 <- wf_status_df$wf_only_bardmux_status
-  cols3 <- rep("#6c757d", length(counts3))
-  bp3 <- barplot(counts3, names.arg = labels3, col = cols3, ylim = c(0, max(counts3, 1) * 1.32), las = 2,
-                 main = "wf-only Assigned IDs: bardmux Status", ylab = "Distinct read IDs")
-  pct3 <- ifelse(is.na(wf_status_df$pct_of_wf_only), 0, wf_status_df$pct_of_wf_only)
-  lab3 <- sprintf("%s\n(%.1f%%)", format(counts3, big.mark = ",", scientific = FALSE), pct3)
-  text(bp3, counts3, labels = lab3, pos = 3, cex = 0.8)
+  wf_status_df$wf_only_bardmux_status <- factor(wf_status_df$wf_only_bardmux_status,
+                                                 levels = wf_status_df$wf_only_bardmux_status)
+  wf_status_df$label <- sprintf("%s\n(%.1f%%)",
+                                format(wf_status_df$count, big.mark = ",", scientific = FALSE),
+                                wf_status_df$pct_of_wf_only)
+
+  p3 <- ggplot2::ggplot(wf_status_df,
+                        ggplot2::aes(x = wf_only_bardmux_status, y = count)) +
+    ggplot2::geom_col(width = 0.8, fill = "#6c757d", color = "#1f1f1f") +
+    ggplot2::geom_text(ggplot2::aes(label = label), vjust = -0.25, size = 3.8, lineheight = 0.95) +
+    ggplot2::scale_y_continuous(labels = scales::comma, expand = ggplot2::expansion(mult = c(0, 0.16))) +
+    ggplot2::labs(
+      title = "wf-only Assigned IDs: bardmux Status",
+      subtitle = sprintf("wf-only IDs: %s", format(wf_only, big.mark = ",", scientific = FALSE)),
+      x = NULL,
+      y = "Distinct read IDs"
+    ) +
+    ggplot2::theme_bw(base_size = 13) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(angle = 25, hjust = 1),
+      plot.title = ggplot2::element_text(face = "bold")
+    )
 } else {
-  plot.new()
-  title("wf-only Assigned IDs: bardmux Status")
-  text(0.5, 0.5, "No wf_only_bardmux_status section found", cex = 1)
+  p3 <- make_empty_plot(ggplot2,
+                        "wf-only Assigned IDs: bardmux Status",
+                        "No status section found",
+                        "No wf_only_bardmux_status block found in summary")
 }
 
-# Panel 4: strict edit-distance concordance
+# Panel 4
 if (!is.null(edit_df) && nrow(edit_df) > 0) {
   edit_df <- edit_df[order(edit_df$strict_edit_distance), , drop = FALSE]
-  mat <- rbind(as.numeric(edit_df$concordant_ids), as.numeric(edit_df$discordant_ids))
-  colnames(mat) <- as.character(edit_df$strict_edit_distance)
-  bp4 <- barplot(mat, beside = FALSE, col = c("#2a9d8f", "#d62828"), names.arg = colnames(mat),
-                 main = "Strict Concordance by bardmux Edit Distance",
-                 xlab = "Edit distance", ylab = "Read IDs")
-  legend("topright", legend = c("Concordant", "Discordant"),
-         fill = c("#2a9d8f", "#d62828"), bty = "n")
+
+  ed <- as.character(edit_df$strict_edit_distance)
+  p4_df <- data.frame(
+    edit_distance = factor(rep(ed, each = 2), levels = ed),
+    concordance = factor(rep(c("Concordant", "Discordant"), times = nrow(edit_df)),
+                         levels = c("Concordant", "Discordant")),
+    count = as.numeric(c(rbind(edit_df$concordant_ids, edit_df$discordant_ids)))
+  )
+
+  p4 <- ggplot2::ggplot(p4_df, ggplot2::aes(x = edit_distance, y = count, fill = concordance)) +
+    ggplot2::geom_col(width = 0.75, color = "#1f1f1f") +
+    ggplot2::scale_fill_manual(values = c("Concordant" = "#2a9d8f", "Discordant" = "#d62828")) +
+    ggplot2::scale_y_continuous(labels = scales::comma, expand = ggplot2::expansion(mult = c(0, 0.08))) +
+    ggplot2::labs(
+      title = "Strict Concordance by bardmux Edit Distance",
+      subtitle = "Discordance concentrated at edit distance = 2",
+      x = "Edit distance",
+      y = "Read IDs",
+      fill = NULL
+    ) +
+    ggplot2::theme_bw(base_size = 13) +
+    ggplot2::theme(
+      legend.position = "top",
+      plot.title = ggplot2::element_text(face = "bold")
+    )
 } else {
-  plot.new()
-  title("Strict Concordance by bardmux Edit Distance")
-  text(0.5, 0.5, "No strict_edit_distance section found", cex = 1)
+  p4 <- make_empty_plot(ggplot2,
+                        "Strict Concordance by bardmux Edit Distance",
+                        "No edit-distance section found",
+                        "No strict_edit_distance block found in summary")
 }
 
-mtext(sprintf("%s | Jaccard: %.2f%% | bardmux_vs_wf: %.2f%% | wf_vs_bardmux: %.2f%%",
-              cfg$title, jaccard, bardmux_vs_wf, wf_vs_bardmux),
-      side = 3, outer = TRUE, line = 0.3, cex = 0.9)
+out_png <- paste0(cfg$out_prefix, ".overview.png")
+
+# Arrange 2x2 without extra dependencies beyond ggplot2 + base grid.
+png(out_png, width = 1900, height = 1400, res = 160)
+grid::grid.newpage()
+layout <- grid::grid.layout(nrow = 3, ncol = 2,
+                            heights = grid::unit(c(0.08, 0.46, 0.46), "npc"),
+                            widths = grid::unit(c(0.5, 0.5), "npc"))
+grid::pushViewport(grid::viewport(layout = layout))
+
+grid::grid.text(cfg$title,
+                vp = grid::viewport(layout.pos.row = 1, layout.pos.col = 1:2),
+                gp = grid::gpar(fontsize = 18, fontface = "bold"))
+
+print(p1, vp = grid::viewport(layout.pos.row = 2, layout.pos.col = 1))
+print(p2, vp = grid::viewport(layout.pos.row = 2, layout.pos.col = 2))
+print(p3, vp = grid::viewport(layout.pos.row = 3, layout.pos.col = 1))
+print(p4, vp = grid::viewport(layout.pos.row = 3, layout.pos.col = 2))
 
 dev.off()
 
