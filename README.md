@@ -139,6 +139,72 @@ Expected test CB/UMI:
 - CB: `ACAGCCGCAAACAACA`
 - UMI: `GCAGTGTGCG`
 
+## Compare CB Calls vs wf-single-cell
+
+`compare_cb_assignments` compares corrected CB calls between:
+- `bardmux` assignment TSV (`read_id`, `matched_cb`)
+- wf-single-cell read/CB table (`read_id`, `corrected_barcode`)
+
+Read ID normalization:
+- bardmux IDs are trimmed at first space (removes ONT aux tags like `dx:i:0`)
+- wf IDs strip trailing `_<digits>` by default (e.g. `_0`)
+
+Only bardmux rows with `status=unique` and `matched_cb != unassigned` are compared.
+
+Example:
+
+```bash
+./build/compare_cb_assignments \
+  --bardmux CCH_797_assign.tsv \
+  --wf wf_single_cell_corrected_cb.tsv \
+  --tmp /scratch/bardmux_cmp_tmp \
+  --threads 24 \
+  --sort-mem 50% \
+  --out cb_compare_summary.tsv \
+  --disagreements cb_compare_disagreements.tsv \
+  --wf-only-status cb_compare_wf_only_status.tsv \
+  --max-disagreements 1000
+```
+
+Main reported metrics:
+- `intersection_assigned_ids`: reads assigned by both tools
+- `strict_concordance_pct`: CB concordance where both tools have a single unique CB per read
+- `assigned_id_jaccard_pct`: overlap of assigned-read sets
+- `bardmux_vs_wf_assigned_coverage_pct`: fraction of wf-assigned reads also assigned by bardmux
+- `wf_vs_bardmux_assigned_coverage_pct`: fraction of bardmux-assigned reads also assigned by wf
+- `wf_only_bardmux_status` table: among wf-assigned reads that bardmux does not assign, how bardmux categorized them (`no_anchor`, `no_match`, `no_cb`, etc.)
+- duplicate/conflict counters (same read ID with multiple CBs in either table)
+
+For compressed wf files, process substitution works well on Linux:
+
+```bash
+./build/compare_cb_assignments \
+  --bardmux CCH_797_assign.tsv \
+  --wf <(pigz -dc -p 24 wf_single_cell_corrected_cb.tsv.gz) \
+  --tmp /scratch/bardmux_cmp_tmp \
+  --threads 24 --sort-mem 50%
+```
+
+### Plot Summary (R)
+
+Use the provided script to generate an annotated overview PNG with counts and percentages:
+
+```bash
+Rscript scripts/plot_cb_compare.R \
+  --summary cb_compare_summary.tsv \
+  --out-prefix cb_compare \
+  --title "CCH_797 bardmux vs wf-single-cell"
+```
+
+This produces:
+- `cb_compare.overview.png`
+
+Panels include:
+- assigned-set composition (`intersection`, `bardmux_only`, `wf_only`)
+- strict CB concordance (`concordant`, `discordant`)
+- wf-only reads split by bardmux status
+- strict concordance split by bardmux `edit_distance`
+
 ## License
 
 MIT

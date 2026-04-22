@@ -32,16 +32,22 @@ set(SOURCES
 )
 
 add_executable(bardmux ${SOURCES})
+add_executable(compare_cb_assignments src/compare_cb_assignments.cpp)
 
 target_include_directories(bardmux PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(compare_cb_assignments PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_link_libraries(bardmux PRIVATE
     ZLIB::ZLIB
     Threads::Threads
 )
 
+target_link_libraries(compare_cb_assignments PRIVATE
+    Threads::Threads
+)
+
 enable_testing()
 
-install(TARGETS bardmux DESTINATION bin)
+install(TARGETS bardmux compare_cb_assignments DESTINATION bin)
 
 message(STATUS "bardmux v2.0.0  LTO=${CMAKE_INTERPROCEDURAL_OPTIMIZATION}")
