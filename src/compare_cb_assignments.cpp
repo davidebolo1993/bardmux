@@ -20,6 +20,7 @@ namespace fs = std::filesystem;
 
 struct Config {
     std::string bardmux_file;
+    std::string bardmux2_file;
     std::string wf_file;
     std::string tmp_dir;
     std::string out_file;
@@ -88,6 +89,46 @@ struct JoinStats {
         std::string bardmux_cb;
         std::string wf_cb;
         int         bardmux_edit = -1;
+    };
+    std::vector<Disagreement> disagreement_examples;
+};
+
+struct B2JoinStats {
+    uint64_t a_assigned_distinct_ids = 0;
+    uint64_t b_assigned_distinct_ids = 0;
+    uint64_t assigned_intersection_ids = 0;
+    uint64_t a_only_assigned_ids = 0;
+    uint64_t b_only_assigned_ids = 0;
+
+    uint64_t assigned_strict_comparable_ids = 0;
+    uint64_t assigned_cb_match_ids = 0;
+    uint64_t assigned_cb_mismatch_ids = 0;
+
+    uint64_t a_dup_assigned_groups = 0;
+    uint64_t b_dup_assigned_groups = 0;
+    uint64_t a_dup_assigned_conflicting_groups = 0;
+    uint64_t b_dup_assigned_conflicting_groups = 0;
+
+    uint64_t a_status_distinct_ids = 0;
+    uint64_t b_status_distinct_ids = 0;
+    uint64_t shared_status_ids = 0;
+    uint64_t a_only_status_ids = 0;
+    uint64_t b_only_status_ids = 0;
+
+    uint64_t anchor_found_both_shared_ids = 0;
+    uint64_t anchor_found_a_only_shared_ids = 0;
+    uint64_t anchor_found_b_only_shared_ids = 0;
+    uint64_t anchor_found_neither_shared_ids = 0;
+
+    std::map<int, std::pair<uint64_t, uint64_t>> strict_edit_hist_a; // editA -> (match, mismatch)
+    std::map<std::string, uint64_t> status_transition_counts; // "statusA\tstatusB" -> count
+
+    struct Disagreement {
+        std::string id;
+        std::string a_cb;
+        std::string b_cb;
+        int         a_edit = -1;
+        int         b_edit = -1;
     };
     std::vector<Disagreement> disagreement_examples;
 };
@@ -180,10 +221,13 @@ private:
 
 static void usage(const char* prog) {
     std::cerr
-        << "Usage: " << prog << " --bardmux ASSIGN.tsv --wf WF.tsv --tmp TMP_DIR [options]\n\n"
+        << "Usage:\n"
+        << "  " << prog << " --bardmux ASSIGN.tsv --wf WF.tsv --tmp TMP_DIR [options]\n"
+        << "  " << prog << " --bardmux ASSIGN_A.tsv --bardmux2 ASSIGN_B.tsv --tmp TMP_DIR [options]\n\n"
         << "Required:\n"
         << "  --bardmux FILE      bardmux assignment TSV\n"
-        << "  --wf FILE           wf-single-cell read->CB table\n"
+        << "  --wf FILE           wf-single-cell read->CB table (mode: bardmux_vs_wf)\n"
+        << "  --bardmux2 FILE     second bardmux assignment TSV (mode: bardmux_vs_bardmux)\n"
         << "  --tmp DIR           Temporary directory for intermediates\n\n"
         << "Options:\n"
         << "  --out FILE          Write summary report to FILE (default: stdout)\n"
@@ -192,7 +236,8 @@ static void usage(const char* prog) {
         << "  --bardmux-unassigned X  Token treated as unassigned in matched_cb (default: unassigned)\n"
         << "  --no-wf-strip-suffix  Keep wf read ids as-is (default strips trailing _<digits>)\n"
         << "  --disagreements FILE   Write strict discordant examples to FILE\n"
-        << "  --wf-only-status FILE  Write wf-only bardmux-status table to FILE\n"
+        << "  --wf-only-status FILE  In wf mode: write wf-only bardmux-status table.\n"
+        << "                         In bardmux2 mode: write status-transition table.\n"
         << "  --max-disagreements INT  Max discordant examples kept (default: 20)\n"
         << "  --progress-rows INT   Progress update interval in rows (default: 5000000)\n"
         << "  --no-progress         Disable progress messages\n"
@@ -275,6 +320,8 @@ static bool parse_args(int argc, char** argv, Config& cfg) {
         else if (a == "--bardmux" && i + 1 < argc) cfg.bardmux_file = argv[++i];
         else if (a == "--our" && i + 1 < argc) cfg.bardmux_file = argv[++i];
         else if (a == "--wf" && i + 1 < argc) cfg.wf_file = argv[++i];
+        else if (a == "--bardmux2" && i + 1 < argc) cfg.bardmux2_file = argv[++i];
+        else if (a == "--bardmux-b" && i + 1 < argc) cfg.bardmux2_file = argv[++i];
         else if (a == "--tmp" && i + 1 < argc) cfg.tmp_dir = argv[++i];
         else if (a == "--out" && i + 1 < argc) cfg.out_file = argv[++i];
         else if (a == "--threads" && i + 1 < argc) {
@@ -305,7 +352,13 @@ static bool parse_args(int argc, char** argv, Config& cfg) {
             return false;
         }
     }
-    if (cfg.bardmux_file.empty() || cfg.wf_file.empty() || cfg.tmp_dir.empty()) return false;
+    if (cfg.bardmux_file.empty() || cfg.tmp_dir.empty()) return false;
+    const bool has_wf = !cfg.wf_file.empty();
+    const bool has_b2 = !cfg.bardmux2_file.empty();
+    if (has_wf == has_b2) {
+        std::cerr << "Provide exactly one of --wf or --bardmux2\n";
+        return false;
+    }
     return true;
 }
 
@@ -317,12 +370,14 @@ static uint64_t try_get_file_size(const fs::path& p) {
 }
 
 static bool normalize_bardmux_file(const Config& cfg,
+                                   const std::string& input_file,
+                                   const std::string& phase_label,
                                    const fs::path& out_assigned_norm,
                                    const fs::path& out_status_norm,
                                    BardmuxParseStats& stats) {
-    std::ifstream in(cfg.bardmux_file);
+    std::ifstream in(input_file);
     if (!in.is_open()) {
-        std::cerr << "Cannot open bardmux file: " << cfg.bardmux_file << "\n";
+        std::cerr << "Cannot open bardmux file: " << input_file << "\n";
         return false;
     }
     std::ofstream out_assigned(out_assigned_norm);
@@ -336,7 +391,7 @@ static bool normalize_bardmux_file(const Config& cfg,
         return false;
     }
 
-    PhaseProgress prog("normalize bardmux", cfg.progress, cfg.progress_rows, try_get_file_size(cfg.bardmux_file));
+    PhaseProgress prog(phase_label, cfg.progress, cfg.progress_rows, try_get_file_size(input_file));
     std::string line;
     bool first = true;
     while (std::getline(in, line)) {
@@ -762,6 +817,229 @@ static bool count_wf_only_statuses(const Config& cfg,
     return true;
 }
 
+static bool group_has_anchor(const std::vector<BardmuxStatusRec>& group) {
+    for (const auto& r : group) {
+        if (r.status != "no_anchor") return true;
+    }
+    return false;
+}
+
+static bool merge_join_assigned_b2(const Config& cfg,
+                                   const fs::path& a_sorted,
+                                   const fs::path& b_sorted,
+                                   B2JoinStats& js) {
+    std::ifstream a(a_sorted);
+    std::ifstream b(b_sorted);
+    if (!a.is_open() || !b.is_open()) {
+        std::cerr << "Cannot open bardmux-vs-bardmux assigned sorted files\n";
+        return false;
+    }
+
+    PhaseProgress prog("merge assigned (bardmux vs bardmux)", cfg.progress, cfg.progress_rows, 0);
+
+    BardmuxAssignedRec ar;
+    BardmuxAssignedRec br;
+    bool has_a = read_next_bardmux_assigned(a, ar);
+    bool has_b = read_next_bardmux_assigned(b, br);
+
+    while (has_a && has_b) {
+        if (ar.id < br.id) {
+            BardmuxAssignedRec next_a;
+            auto ga = consume_group(std::move(ar), a, read_next_bardmux_assigned, has_a, next_a);
+            ++js.a_assigned_distinct_ids;
+            ++js.a_only_assigned_ids;
+            if (ga.size() > 1) {
+                ++js.a_dup_assigned_groups;
+                if (!all_same_cb_bardmux(ga)) ++js.a_dup_assigned_conflicting_groups;
+            }
+            prog.tick_row();
+            if (has_a) ar = std::move(next_a);
+            continue;
+        }
+        if (br.id < ar.id) {
+            BardmuxAssignedRec next_b;
+            auto gb = consume_group(std::move(br), b, read_next_bardmux_assigned, has_b, next_b);
+            ++js.b_assigned_distinct_ids;
+            ++js.b_only_assigned_ids;
+            if (gb.size() > 1) {
+                ++js.b_dup_assigned_groups;
+                if (!all_same_cb_bardmux(gb)) ++js.b_dup_assigned_conflicting_groups;
+            }
+            prog.tick_row();
+            if (has_b) br = std::move(next_b);
+            continue;
+        }
+
+        BardmuxAssignedRec next_a;
+        BardmuxAssignedRec next_b;
+        auto ga = consume_group(std::move(ar), a, read_next_bardmux_assigned, has_a, next_a);
+        auto gb = consume_group(std::move(br), b, read_next_bardmux_assigned, has_b, next_b);
+
+        ++js.a_assigned_distinct_ids;
+        ++js.b_assigned_distinct_ids;
+        ++js.assigned_intersection_ids;
+
+        if (ga.size() > 1) {
+            ++js.a_dup_assigned_groups;
+            if (!all_same_cb_bardmux(ga)) ++js.a_dup_assigned_conflicting_groups;
+        }
+        if (gb.size() > 1) {
+            ++js.b_dup_assigned_groups;
+            if (!all_same_cb_bardmux(gb)) ++js.b_dup_assigned_conflicting_groups;
+        }
+
+        const int uniq_a = count_unique_cb(ga);
+        const int uniq_b = count_unique_cb(gb);
+        if (uniq_a == 1 && uniq_b == 1) {
+            ++js.assigned_strict_comparable_ids;
+            const int ed_a = min_edit_in_group(ga);
+            if (ga.front().cb == gb.front().cb) {
+                ++js.assigned_cb_match_ids;
+                js.strict_edit_hist_a[ed_a].first++;
+            } else {
+                ++js.assigned_cb_mismatch_ids;
+                js.strict_edit_hist_a[ed_a].second++;
+                if (static_cast<int>(js.disagreement_examples.size()) < cfg.max_disagreements) {
+                    B2JoinStats::Disagreement d;
+                    d.id = ga.front().id;
+                    d.a_cb = ga.front().cb;
+                    d.b_cb = gb.front().cb;
+                    d.a_edit = ga.front().edit;
+                    d.b_edit = gb.front().edit;
+                    js.disagreement_examples.push_back(std::move(d));
+                }
+            }
+        }
+
+        prog.tick_row();
+        if (has_a) ar = std::move(next_a);
+        if (has_b) br = std::move(next_b);
+    }
+
+    while (has_a) {
+        BardmuxAssignedRec next_a;
+        auto ga = consume_group(std::move(ar), a, read_next_bardmux_assigned, has_a, next_a);
+        ++js.a_assigned_distinct_ids;
+        ++js.a_only_assigned_ids;
+        if (ga.size() > 1) {
+            ++js.a_dup_assigned_groups;
+            if (!all_same_cb_bardmux(ga)) ++js.a_dup_assigned_conflicting_groups;
+        }
+        prog.tick_row();
+        if (has_a) ar = std::move(next_a);
+    }
+    while (has_b) {
+        BardmuxAssignedRec next_b;
+        auto gb = consume_group(std::move(br), b, read_next_bardmux_assigned, has_b, next_b);
+        ++js.b_assigned_distinct_ids;
+        ++js.b_only_assigned_ids;
+        if (gb.size() > 1) {
+            ++js.b_dup_assigned_groups;
+            if (!all_same_cb_bardmux(gb)) ++js.b_dup_assigned_conflicting_groups;
+        }
+        prog.tick_row();
+        if (has_b) br = std::move(next_b);
+    }
+
+    std::ostringstream sfx;
+    sfx << "assigned_intersection=" << fmt_u64(js.assigned_intersection_ids)
+        << ", a_only=" << fmt_u64(js.a_only_assigned_ids)
+        << ", b_only=" << fmt_u64(js.b_only_assigned_ids);
+    prog.print_done(sfx.str());
+    return true;
+}
+
+static bool compare_statuses_b2(const Config& cfg,
+                                const fs::path& a_status_sorted,
+                                const fs::path& b_status_sorted,
+                                B2JoinStats& js) {
+    std::ifstream a(a_status_sorted);
+    std::ifstream b(b_status_sorted);
+    if (!a.is_open() || !b.is_open()) {
+        std::cerr << "Cannot open bardmux-vs-bardmux status sorted files\n";
+        return false;
+    }
+
+    PhaseProgress prog("compare statuses (bardmux vs bardmux)", cfg.progress, cfg.progress_rows, 0);
+
+    BardmuxStatusRec ar;
+    BardmuxStatusRec br;
+    bool has_a = read_next_bardmux_status(a, ar);
+    bool has_b = read_next_bardmux_status(b, br);
+
+    while (has_a && has_b) {
+        if (ar.id < br.id) {
+            BardmuxStatusRec next_a;
+            auto ga = consume_group(std::move(ar), a, read_next_bardmux_status, has_a, next_a);
+            ++js.a_status_distinct_ids;
+            ++js.a_only_status_ids;
+            (void)ga;
+            prog.tick_row();
+            if (has_a) ar = std::move(next_a);
+            continue;
+        }
+        if (br.id < ar.id) {
+            BardmuxStatusRec next_b;
+            auto gb = consume_group(std::move(br), b, read_next_bardmux_status, has_b, next_b);
+            ++js.b_status_distinct_ids;
+            ++js.b_only_status_ids;
+            (void)gb;
+            prog.tick_row();
+            if (has_b) br = std::move(next_b);
+            continue;
+        }
+
+        BardmuxStatusRec next_a;
+        BardmuxStatusRec next_b;
+        auto ga = consume_group(std::move(ar), a, read_next_bardmux_status, has_a, next_a);
+        auto gb = consume_group(std::move(br), b, read_next_bardmux_status, has_b, next_b);
+
+        ++js.a_status_distinct_ids;
+        ++js.b_status_distinct_ids;
+        ++js.shared_status_ids;
+
+        const std::string sa = collapse_status_group(ga);
+        const std::string sb = collapse_status_group(gb);
+        js.status_transition_counts[sa + "\t" + sb]++;
+
+        const bool anchor_a = group_has_anchor(ga);
+        const bool anchor_b = group_has_anchor(gb);
+        if (anchor_a && anchor_b) ++js.anchor_found_both_shared_ids;
+        else if (anchor_a) ++js.anchor_found_a_only_shared_ids;
+        else if (anchor_b) ++js.anchor_found_b_only_shared_ids;
+        else ++js.anchor_found_neither_shared_ids;
+
+        prog.tick_row();
+        if (has_a) ar = std::move(next_a);
+        if (has_b) br = std::move(next_b);
+    }
+
+    while (has_a) {
+        BardmuxStatusRec next_a;
+        auto ga = consume_group(std::move(ar), a, read_next_bardmux_status, has_a, next_a);
+        ++js.a_status_distinct_ids;
+        ++js.a_only_status_ids;
+        (void)ga;
+        prog.tick_row();
+        if (has_a) ar = std::move(next_a);
+    }
+    while (has_b) {
+        BardmuxStatusRec next_b;
+        auto gb = consume_group(std::move(br), b, read_next_bardmux_status, has_b, next_b);
+        ++js.b_status_distinct_ids;
+        ++js.b_only_status_ids;
+        (void)gb;
+        prog.tick_row();
+        if (has_b) br = std::move(next_b);
+    }
+
+    std::ostringstream sfx;
+    sfx << "shared_status_ids=" << fmt_u64(js.shared_status_ids)
+        << ", both_anchor=" << fmt_u64(js.anchor_found_both_shared_ids);
+    prog.print_done(sfx.str());
+    return true;
+}
+
 static void write_wf_only_status_table(std::ostream& out, const JoinStats& js) {
     out << "wf_only_bardmux_status\tcount\tpct_of_wf_only\n";
     const double denom = static_cast<double>(js.wf_only_ids);
@@ -796,6 +1074,7 @@ static void write_summary(std::ostream& out,
         ? (100.0 * js.both_ids / (js.bardmux_distinct_ids + eps)) : 0.0;
 
     out << "metric\tvalue\n";
+    out << "comparison_mode\tbardmux_vs_wf\n";
     out << "bardmux_input_rows\t" << bardmux_ps.input_rows << "\n";
     out << "bardmux_status_rows\t" << bardmux_ps.status_rows << "\n";
     out << "bardmux_unique_assigned_rows\t" << bardmux_ps.unique_assigned_rows << "\n";
@@ -856,6 +1135,127 @@ static void write_wf_only_status_file(const fs::path& out_path, const JoinStats&
     write_wf_only_status_table(out, js);
 }
 
+static void write_status_transition_table(std::ostream& out, const B2JoinStats& js) {
+    out << "status_a\tstatus_b\tcount\tpct_of_shared_status_ids\n";
+    const double denom = static_cast<double>(js.shared_status_ids);
+
+    std::vector<std::pair<std::string, uint64_t>> rows(js.status_transition_counts.begin(),
+                                                       js.status_transition_counts.end());
+    std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+        if (a.second != b.second) return a.second > b.second;
+        return a.first < b.first;
+    });
+
+    for (const auto& kv : rows) {
+        const std::string& key = kv.first;
+        auto tab = key.find('\t');
+        std::string sa = (tab == std::string::npos) ? key : key.substr(0, tab);
+        std::string sb = (tab == std::string::npos) ? "" : key.substr(tab + 1);
+        const double pct = (denom > 0.0) ? (100.0 * static_cast<double>(kv.second) / denom) : 0.0;
+        out << sa << '\t' << sb << '\t' << kv.second << '\t'
+            << std::fixed << std::setprecision(4) << pct << '\n';
+    }
+}
+
+static void write_summary_b2(std::ostream& out,
+                             const BardmuxParseStats& a_ps,
+                             const BardmuxParseStats& b_ps,
+                             const B2JoinStats& js) {
+    const double eps = 1e-12;
+    const double cb_match_pct = (js.assigned_strict_comparable_ids > 0)
+        ? (100.0 * js.assigned_cb_match_ids / (js.assigned_strict_comparable_ids + eps)) : 0.0;
+    const double jaccard = (js.a_assigned_distinct_ids + js.b_assigned_distinct_ids - js.assigned_intersection_ids > 0)
+        ? (100.0 * js.assigned_intersection_ids /
+           (js.a_assigned_distinct_ids + js.b_assigned_distinct_ids - js.assigned_intersection_ids + eps)) : 0.0;
+    const double a_vs_b_cov = (js.b_assigned_distinct_ids > 0)
+        ? (100.0 * js.assigned_intersection_ids / (js.b_assigned_distinct_ids + eps)) : 0.0;
+    const double b_vs_a_cov = (js.a_assigned_distinct_ids > 0)
+        ? (100.0 * js.assigned_intersection_ids / (js.a_assigned_distinct_ids + eps)) : 0.0;
+
+    uint64_t exact_status_match = 0;
+    for (const auto& kv : js.status_transition_counts) {
+        auto tab = kv.first.find('\t');
+        if (tab == std::string::npos) continue;
+        if (kv.first.substr(0, tab) == kv.first.substr(tab + 1)) exact_status_match += kv.second;
+    }
+    const double exact_status_match_pct = (js.shared_status_ids > 0)
+        ? (100.0 * exact_status_match / (js.shared_status_ids + eps)) : 0.0;
+    const double both_anchor_pct = (js.shared_status_ids > 0)
+        ? (100.0 * js.anchor_found_both_shared_ids / (js.shared_status_ids + eps)) : 0.0;
+    const double a_only_anchor_pct = (js.shared_status_ids > 0)
+        ? (100.0 * js.anchor_found_a_only_shared_ids / (js.shared_status_ids + eps)) : 0.0;
+    const double b_only_anchor_pct = (js.shared_status_ids > 0)
+        ? (100.0 * js.anchor_found_b_only_shared_ids / (js.shared_status_ids + eps)) : 0.0;
+    const double neither_anchor_pct = (js.shared_status_ids > 0)
+        ? (100.0 * js.anchor_found_neither_shared_ids / (js.shared_status_ids + eps)) : 0.0;
+
+    out << "metric\tvalue\n";
+    out << "comparison_mode\tbardmux_vs_bardmux\n";
+    out << "bardmux_a_input_rows\t" << a_ps.input_rows << "\n";
+    out << "bardmux_a_status_rows\t" << a_ps.status_rows << "\n";
+    out << "bardmux_a_unique_assigned_rows\t" << a_ps.unique_assigned_rows << "\n";
+    out << "bardmux_a_malformed_rows\t" << a_ps.malformed_rows << "\n";
+    out << "bardmux_b_input_rows\t" << b_ps.input_rows << "\n";
+    out << "bardmux_b_status_rows\t" << b_ps.status_rows << "\n";
+    out << "bardmux_b_unique_assigned_rows\t" << b_ps.unique_assigned_rows << "\n";
+    out << "bardmux_b_malformed_rows\t" << b_ps.malformed_rows << "\n";
+    out << "bardmux_a_assigned_distinct_ids\t" << js.a_assigned_distinct_ids << "\n";
+    out << "bardmux_b_assigned_distinct_ids\t" << js.b_assigned_distinct_ids << "\n";
+    out << "assigned_intersection_ids\t" << js.assigned_intersection_ids << "\n";
+    out << "bardmux_a_only_assigned_ids\t" << js.a_only_assigned_ids << "\n";
+    out << "bardmux_b_only_assigned_ids\t" << js.b_only_assigned_ids << "\n";
+    out << "assigned_strict_comparable_ids\t" << js.assigned_strict_comparable_ids << "\n";
+    out << "assigned_cb_match_ids\t" << js.assigned_cb_match_ids << "\n";
+    out << "assigned_cb_mismatch_ids\t" << js.assigned_cb_mismatch_ids << "\n";
+    out << "assigned_cb_match_pct\t" << std::fixed << std::setprecision(4) << cb_match_pct << "\n";
+    out << "assigned_id_jaccard_pct\t" << std::fixed << std::setprecision(4) << jaccard << "\n";
+    out << "bardmux_a_vs_b_assigned_coverage_pct\t" << std::fixed << std::setprecision(4) << a_vs_b_cov << "\n";
+    out << "bardmux_b_vs_a_assigned_coverage_pct\t" << std::fixed << std::setprecision(4) << b_vs_a_cov << "\n";
+    out << "bardmux_a_duplicate_assigned_groups\t" << js.a_dup_assigned_groups << "\n";
+    out << "bardmux_a_duplicate_assigned_conflicting_groups\t" << js.a_dup_assigned_conflicting_groups << "\n";
+    out << "bardmux_b_duplicate_assigned_groups\t" << js.b_dup_assigned_groups << "\n";
+    out << "bardmux_b_duplicate_assigned_conflicting_groups\t" << js.b_dup_assigned_conflicting_groups << "\n";
+    out << "shared_status_ids\t" << js.shared_status_ids << "\n";
+    out << "status_exact_match_ids\t" << exact_status_match << "\n";
+    out << "status_exact_match_pct\t" << std::fixed << std::setprecision(4) << exact_status_match_pct << "\n";
+    out << "anchor_found_both_shared_ids\t" << js.anchor_found_both_shared_ids << "\n";
+    out << "anchor_found_a_only_shared_ids\t" << js.anchor_found_a_only_shared_ids << "\n";
+    out << "anchor_found_b_only_shared_ids\t" << js.anchor_found_b_only_shared_ids << "\n";
+    out << "anchor_found_neither_shared_ids\t" << js.anchor_found_neither_shared_ids << "\n";
+    out << "anchor_found_both_shared_pct\t" << std::fixed << std::setprecision(4) << both_anchor_pct << "\n";
+    out << "anchor_found_a_only_shared_pct\t" << std::fixed << std::setprecision(4) << a_only_anchor_pct << "\n";
+    out << "anchor_found_b_only_shared_pct\t" << std::fixed << std::setprecision(4) << b_only_anchor_pct << "\n";
+    out << "anchor_found_neither_shared_pct\t" << std::fixed << std::setprecision(4) << neither_anchor_pct << "\n";
+
+    out << "\nstrict_edit_distance_a\tmatch_ids\tmismatch_ids\n";
+    for (const auto& kv : js.strict_edit_hist_a) {
+        out << kv.first << '\t' << kv.second.first << '\t' << kv.second.second << "\n";
+    }
+
+    out << "\n";
+    write_status_transition_table(out, js);
+
+    out << "\n# disagreement_examples\n";
+    out << "read_id\tbardmux_a_cb\tbardmux_b_cb\tbardmux_a_edit\tbardmux_b_edit\n";
+    for (const auto& ex : js.disagreement_examples) {
+        out << ex.id << '\t' << ex.a_cb << '\t' << ex.b_cb << '\t'
+            << ex.a_edit << '\t' << ex.b_edit << "\n";
+    }
+}
+
+static void write_disagreements_file_b2(const fs::path& out_path, const B2JoinStats& js) {
+    std::ofstream out(out_path);
+    if (!out.is_open()) {
+        std::cerr << "Cannot open disagreements file: " << out_path << "\n";
+        return;
+    }
+    out << "read_id\tbardmux_a_cb\tbardmux_b_cb\tbardmux_a_edit\tbardmux_b_edit\n";
+    for (const auto& ex : js.disagreement_examples) {
+        out << ex.id << '\t' << ex.a_cb << '\t' << ex.b_cb << '\t'
+            << ex.a_edit << '\t' << ex.b_edit << "\n";
+    }
+}
+
 int main(int argc, char** argv) {
     Config cfg;
     if (!parse_args(argc, argv, cfg)) {
@@ -870,54 +1270,103 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const fs::path bardmux_assigned_norm   = fs::path(cfg.tmp_dir) / "bardmux.assigned.norm.tsv";
-    const fs::path bardmux_status_norm     = fs::path(cfg.tmp_dir) / "bardmux.status.norm.tsv";
-    const fs::path wf_norm                 = fs::path(cfg.tmp_dir) / "wf.assigned.norm.tsv";
+    const bool mode_wf = !cfg.wf_file.empty();
+    std::vector<fs::path> temp_files;
 
-    const fs::path bardmux_assigned_sorted = fs::path(cfg.tmp_dir) / "bardmux.assigned.norm.sorted.tsv";
-    const fs::path bardmux_status_sorted   = fs::path(cfg.tmp_dir) / "bardmux.status.norm.sorted.tsv";
-    const fs::path wf_sorted               = fs::path(cfg.tmp_dir) / "wf.assigned.norm.sorted.tsv";
+    if (mode_wf) {
+        const fs::path bardmux_assigned_norm   = fs::path(cfg.tmp_dir) / "bardmux.assigned.norm.tsv";
+        const fs::path bardmux_status_norm     = fs::path(cfg.tmp_dir) / "bardmux.status.norm.tsv";
+        const fs::path wf_norm                 = fs::path(cfg.tmp_dir) / "wf.assigned.norm.tsv";
 
-    const fs::path wf_only_ids_file        = fs::path(cfg.tmp_dir) / "wf.only.assigned.ids.tsv";
+        const fs::path bardmux_assigned_sorted = fs::path(cfg.tmp_dir) / "bardmux.assigned.norm.sorted.tsv";
+        const fs::path bardmux_status_sorted   = fs::path(cfg.tmp_dir) / "bardmux.status.norm.sorted.tsv";
+        const fs::path wf_sorted               = fs::path(cfg.tmp_dir) / "wf.assigned.norm.sorted.tsv";
 
-    BardmuxParseStats bardmux_ps;
-    WfParseStats wf_ps;
+        const fs::path wf_only_ids_file        = fs::path(cfg.tmp_dir) / "wf.only.assigned.ids.tsv";
+        temp_files = {bardmux_assigned_norm, bardmux_status_norm, wf_norm,
+                      bardmux_assigned_sorted, bardmux_status_sorted, wf_sorted, wf_only_ids_file};
 
-    if (!normalize_bardmux_file(cfg, bardmux_assigned_norm, bardmux_status_norm, bardmux_ps)) return 1;
-    if (!normalize_wf_file(cfg, wf_norm, wf_ps)) return 1;
+        BardmuxParseStats bardmux_ps;
+        WfParseStats wf_ps;
 
-    if (!sort_file(cfg, bardmux_assigned_norm, bardmux_assigned_sorted)) return 1;
-    if (!sort_file(cfg, bardmux_status_norm, bardmux_status_sorted)) return 1;
-    if (!sort_file(cfg, wf_norm, wf_sorted)) return 1;
+        if (!normalize_bardmux_file(cfg, cfg.bardmux_file, "normalize bardmux", bardmux_assigned_norm, bardmux_status_norm, bardmux_ps)) return 1;
+        if (!normalize_wf_file(cfg, wf_norm, wf_ps)) return 1;
 
-    JoinStats js;
-    if (!merge_join_assigned(cfg, bardmux_assigned_sorted, wf_sorted, wf_only_ids_file, js)) return 1;
-    if (!count_wf_only_statuses(cfg, wf_only_ids_file, bardmux_status_sorted, js)) return 1;
+        if (!sort_file(cfg, bardmux_assigned_norm, bardmux_assigned_sorted)) return 1;
+        if (!sort_file(cfg, bardmux_status_norm, bardmux_status_sorted)) return 1;
+        if (!sort_file(cfg, wf_norm, wf_sorted)) return 1;
 
-    if (!cfg.out_file.empty()) {
-        std::ofstream ofs(cfg.out_file);
-        if (!ofs.is_open()) {
-            std::cerr << "Cannot open output report: " << cfg.out_file << "\n";
-            return 1;
+        JoinStats js;
+        if (!merge_join_assigned(cfg, bardmux_assigned_sorted, wf_sorted, wf_only_ids_file, js)) return 1;
+        if (!count_wf_only_statuses(cfg, wf_only_ids_file, bardmux_status_sorted, js)) return 1;
+
+        if (!cfg.out_file.empty()) {
+            std::ofstream ofs(cfg.out_file);
+            if (!ofs.is_open()) {
+                std::cerr << "Cannot open output report: " << cfg.out_file << "\n";
+                return 1;
+            }
+            write_summary(ofs, bardmux_ps, wf_ps, js);
+            std::cerr << "Summary written to: " << cfg.out_file << "\n";
+        } else {
+            write_summary(std::cout, bardmux_ps, wf_ps, js);
         }
-        write_summary(ofs, bardmux_ps, wf_ps, js);
-        std::cerr << "Summary written to: " << cfg.out_file << "\n";
-    } else {
-        write_summary(std::cout, bardmux_ps, wf_ps, js);
-    }
 
-    if (!cfg.disagreements_file.empty()) write_disagreements_file(cfg.disagreements_file, js);
-    if (!cfg.wf_only_status_file.empty()) write_wf_only_status_file(cfg.wf_only_status_file, js);
+        if (!cfg.disagreements_file.empty()) write_disagreements_file(cfg.disagreements_file, js);
+        if (!cfg.wf_only_status_file.empty()) write_wf_only_status_file(cfg.wf_only_status_file, js);
+    } else {
+        const fs::path a_assigned_norm   = fs::path(cfg.tmp_dir) / "bardmux_a.assigned.norm.tsv";
+        const fs::path a_status_norm     = fs::path(cfg.tmp_dir) / "bardmux_a.status.norm.tsv";
+        const fs::path b_assigned_norm   = fs::path(cfg.tmp_dir) / "bardmux_b.assigned.norm.tsv";
+        const fs::path b_status_norm     = fs::path(cfg.tmp_dir) / "bardmux_b.status.norm.tsv";
+
+        const fs::path a_assigned_sorted = fs::path(cfg.tmp_dir) / "bardmux_a.assigned.norm.sorted.tsv";
+        const fs::path a_status_sorted   = fs::path(cfg.tmp_dir) / "bardmux_a.status.norm.sorted.tsv";
+        const fs::path b_assigned_sorted = fs::path(cfg.tmp_dir) / "bardmux_b.assigned.norm.sorted.tsv";
+        const fs::path b_status_sorted   = fs::path(cfg.tmp_dir) / "bardmux_b.status.norm.sorted.tsv";
+
+        temp_files = {a_assigned_norm, a_status_norm, b_assigned_norm, b_status_norm,
+                      a_assigned_sorted, a_status_sorted, b_assigned_sorted, b_status_sorted};
+
+        BardmuxParseStats a_ps, b_ps;
+        if (!normalize_bardmux_file(cfg, cfg.bardmux_file, "normalize bardmux A", a_assigned_norm, a_status_norm, a_ps)) return 1;
+        if (!normalize_bardmux_file(cfg, cfg.bardmux2_file, "normalize bardmux B", b_assigned_norm, b_status_norm, b_ps)) return 1;
+
+        if (!sort_file(cfg, a_assigned_norm, a_assigned_sorted)) return 1;
+        if (!sort_file(cfg, a_status_norm, a_status_sorted)) return 1;
+        if (!sort_file(cfg, b_assigned_norm, b_assigned_sorted)) return 1;
+        if (!sort_file(cfg, b_status_norm, b_status_sorted)) return 1;
+
+        B2JoinStats js;
+        if (!merge_join_assigned_b2(cfg, a_assigned_sorted, b_assigned_sorted, js)) return 1;
+        if (!compare_statuses_b2(cfg, a_status_sorted, b_status_sorted, js)) return 1;
+
+        if (!cfg.out_file.empty()) {
+            std::ofstream ofs(cfg.out_file);
+            if (!ofs.is_open()) {
+                std::cerr << "Cannot open output report: " << cfg.out_file << "\n";
+                return 1;
+            }
+            write_summary_b2(ofs, a_ps, b_ps, js);
+            std::cerr << "Summary written to: " << cfg.out_file << "\n";
+        } else {
+            write_summary_b2(std::cout, a_ps, b_ps, js);
+        }
+
+        if (!cfg.disagreements_file.empty()) write_disagreements_file_b2(cfg.disagreements_file, js);
+        if (!cfg.wf_only_status_file.empty()) {
+            std::ofstream out(cfg.wf_only_status_file);
+            if (!out.is_open()) {
+                std::cerr << "Cannot open status-transition file: " << cfg.wf_only_status_file << "\n";
+                return 1;
+            }
+            write_status_transition_table(out, js);
+        }
+    }
 
     if (!cfg.keep_temp) {
         std::error_code ec;
-        fs::remove(bardmux_assigned_norm, ec);
-        fs::remove(bardmux_status_norm, ec);
-        fs::remove(wf_norm, ec);
-        fs::remove(bardmux_assigned_sorted, ec);
-        fs::remove(bardmux_status_sorted, ec);
-        fs::remove(wf_sorted, ec);
-        fs::remove(wf_only_ids_file, ec);
+        for (const auto& p : temp_files) fs::remove(p, ec);
     }
 
     return 0;

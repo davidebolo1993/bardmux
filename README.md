@@ -138,3 +138,102 @@ For unassigned calls, `matched_cb` and `sample` are emitted as `unassigned`.
 Expected test CB/UMI:
 - CB: `ACAGCCGCAAACAACA`
 - UMI: `GCAGTGTGCG`
+
+## Compare Assignments
+
+`compare_cb_assignments` supports two modes:
+
+1. `bardmux_vs_wf`: compare bardmux assignments to wf-single-cell corrected CB table.
+2. `bardmux_vs_bardmux`: compare two bardmux assignment TSVs (different params / barcode lists).
+
+### Build Comparator
+
+```bash
+cmake --build build -j
+```
+
+### Mode 1: bardmux vs wf-single-cell
+
+```bash
+./build/compare_cb_assignments \
+  --bardmux CCH_797_assign.tsv \
+  --wf wf_single_cell_corrected_cb.tsv \
+  --tmp /scratch/bardmux_cmp_tmp \
+  --threads 24 \
+  --sort-mem 50% \
+  --progress-rows 5000000 \
+  --out cb_compare_summary.tsv \
+  --disagreements cb_compare_disagreements.tsv \
+  --wf-only-status cb_compare_wf_only_status.tsv
+```
+
+Key metrics include:
+- `intersection_assigned_ids`
+- `strict_concordance_pct`
+- `bardmux_vs_wf_assigned_coverage_pct`
+- `wf_vs_bardmux_assigned_coverage_pct`
+- `wf_only_bardmux_status` table (`no_anchor`, `no_match`, etc.)
+
+### Mode 2: bardmux vs bardmux
+
+```bash
+./build/compare_cb_assignments \
+  --bardmux assign_A.tsv \
+  --bardmux2 assign_B.tsv \
+  --tmp /scratch/bardmux_pair_tmp \
+  --threads 24 \
+  --sort-mem 50% \
+  --progress-rows 5000000 \
+  --out bardmux_pair_summary.tsv \
+  --disagreements bardmux_pair_disagreements.tsv \
+  --wf-only-status bardmux_pair_status_transitions.tsv
+```
+
+Notes:
+- in `bardmux_vs_bardmux` mode, `--wf-only-status` writes the status transition table (`status_a -> status_b`).
+- summary includes anchor presence comparisons on shared read IDs:
+  - `anchor_found_both_shared_ids`
+  - `anchor_found_a_only_shared_ids`
+  - `anchor_found_b_only_shared_ids`
+  - `anchor_found_neither_shared_ids`
+
+Progress output:
+- phase-level progress is printed to `stderr` (normalization, sorting, merge, status pass)
+- use `--progress-rows` to control update frequency
+- use `--no-progress` to silence progress logs
+
+## Plotting Comparison Reports (R / ggplot2)
+
+Install dependency if needed:
+
+```bash
+R -q -e 'install.packages(c("ggplot2","scales"), repos="https://cloud.r-project.org")'
+```
+
+### Plot bardmux vs wf summary
+
+```bash
+Rscript scripts/plot_cb_compare.R \
+  --summary cb_compare_summary.tsv \
+  --out-prefix cb_compare \
+  --title "CCH_797 bardmux vs wf-single-cell"
+```
+
+Output:
+- `cb_compare.overview.png`
+
+### Plot bardmux vs bardmux summary
+
+```bash
+Rscript scripts/plot_bardmux_pair_compare.R \
+  --summary bardmux_pair_summary.tsv \
+  --out-prefix bardmux_pair \
+  --title "bardmux A vs bardmux B"
+```
+
+Output:
+- `bardmux_pair.overview.png`
+
+## License
+
+MIT

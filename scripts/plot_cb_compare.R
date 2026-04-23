@@ -107,6 +107,9 @@ if (is.null(cfg)) {
 if (!requireNamespace("ggplot2", quietly = TRUE)) {
   stop("Package 'ggplot2' is required. Install with install.packages('ggplot2').")
 }
+if (!requireNamespace("scales", quietly = TRUE)) {
+  stop("Package 'scales' is required. Install with install.packages('scales').")
+}
 
 lines <- readLines(cfg$summary, warn = FALSE)
 blocks <- split_blocks(lines)
@@ -116,6 +119,10 @@ if (is.null(metrics_block)) {
   stop("Could not find metric block in summary")
 }
 metrics <- read_tsv_block(metrics_block)
+mode <- metrics$value[metrics$metric == "comparison_mode"]
+if (length(mode) > 0 && mode[[1]] != "bardmux_vs_wf") {
+  stop("Summary is not bardmux_vs_wf mode. Use plot_bardmux_pair_compare.R for bardmux_vs_bardmux.")
+}
 
 edit_block <- find_block(blocks, "strict_edit_distance\t")
 wf_status_block <- find_block(blocks, "wf_only_bardmux_status\t")
